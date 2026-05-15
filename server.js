@@ -2,23 +2,20 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { resolve, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { fileURLToPath } from 'url';
 import geoip from 'geoip-lite';
 import { DatabaseSync } from 'node:sqlite';
+import { getEnvPath } from './lib/env.js';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-import dotenv from 'dotenv';
-// Load .env if it exists, but don't overwrite existing environment variables (important for Docker)
-dotenv.config({ override: false });
+const ENV_PATH = getEnvPath();
 
-// Import constants for DNS analytics
-import { ACCOUNT_ID, API_TOKEN } from './lib/constants.js';
-
-// Ensure .env is read properly to load API credentials
-// For dynamic requests to Cloudflare Gateway APIs:
+// Import constants for DNS analytics and dynamic Cloudflare Gateway API requests.
 import {
   getZeroTrustLists,
   getZeroTrustRules,
@@ -27,12 +24,11 @@ import {
 } from './lib/api.js';
 import { requestGateway } from './lib/helpers.js';
 import { 
+  ACCOUNT_ID,
+  API_TOKEN,
   RECOMMENDED_ALLOWLIST_URLS, 
   RECOMMENDED_BLOCKLIST_URLS 
 } from './lib/constants.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 const DATA_DIR = join(__dirname, 'data');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR);
@@ -305,6 +301,7 @@ function runScript(scriptArgs, socket) {
     // Strip list URL keys so they are re-read fresh
     const { BLOCKLIST_URLS, ALLOWLIST_URLS, ...inheritedEnv } = process.env;
     const child = spawn("node", scriptArgs, {
+      cwd: __dirname,
       env: { ...inheritedEnv },
     });
 
@@ -330,9 +327,12 @@ function runScript(scriptArgs, socket) {
 
 // Environment File Helpers
 function readEnvUrls(key) {
-  const envPath = resolve("./.env");
-  if (!existsSync(envPath)) return [];
-  const content = readFileSync(envPath, "utf8");
+  if (!existsSync(ENV_PATH)) {
+    return process.env[key]
+      ? process.env[key].split("\n").map(u => u.trim()).filter(Boolean)
+      : [];
+  }
+  const content = readFileSync(ENV_PATH, "utf8");
   
   const quotedMatch = content.match(new RegExp(`^(?:#\\s*)?${key}="([\\s\\S]*?)"`, "m"));
   if (quotedMatch) return quotedMatch[1].split("\n").map(u => u.trim()).filter(Boolean);
@@ -344,10 +344,15 @@ function readEnvUrls(key) {
 }
 
 function writeEnvUrls(key, urls) {
-  const envPath = resolve("./.env");
-  if (!existsSync(envPath)) throw new Error(".env file not found");
+  if (!existsSync(ENV_PATH)) {
+    mkdirSync(dirname(ENV_PATH), { recursive: true });
+
+    const existingBlocklistUrls = process.env.BLOCKLIST_URLS ? `BLOCKLIST_URLS="${process.env.BLOCKLIST_URLS}"\n` : "";
+    const existingAllowlistUrls = process.env.ALLOWLIST_URLS ? `ALLOWLIST_URLS="${process.env.ALLOWLIST_URLS}"\n` : "";
+    writeFileSync(ENV_PATH, `${existingBlocklistUrls}${existingAllowlistUrls}`, "utf8");
+  }
   
-  let content = readFileSync(envPath, "utf8");
+  let content = readFileSync(ENV_PATH, "utf8");
   const value = `"${urls.join("\n")}"`;
   const newLine = `${key}=${value}`;
   
@@ -358,7 +363,7 @@ function writeEnvUrls(key, urls) {
   else if (singlePattern.test(content)) content = content.replace(singlePattern, newLine);
   else content = `${content}\n${newLine}`;
   
-  writeFileSync(envPath, content, "utf8");
+  writeFileSync(ENV_PATH, content, "utf8");
 }
 
 // Allowlist Helpers
