@@ -111,6 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
     statusIndicator.textContent = 'Connected';
     statusIndicator.classList.add('connected');
     statusIndicator.style.color = '';
+    emitDashboardViewState();
   });
   socket.on('disconnect', () => {
     statusIndicator.textContent = 'Disconnected';
@@ -139,6 +140,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const sections = document.querySelectorAll('.section');
   const contentSections = document.querySelector('.content-sections');
   const currentViewLabel = document.getElementById('current-view-label');
+  let activeDashboardTab = document.querySelector('.nav-btn.active')?.dataset.target || 'dns-analytics';
+  function emitDashboardViewState(extra = {}) {
+    socket.emit('dashboard_view_state', {
+      activeTab: activeDashboardTab,
+      ...extra,
+    });
+  }
   const mobileLayoutQuery = window.matchMedia('(max-width: 980px)');
   const updateContentOverflow = () => {
     if (!contentSections) return;
@@ -191,6 +199,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const nextSection = document.getElementById(`section-${targetId}`);
 
       if (currentActive === nextSection) return;
+      activeDashboardTab = targetId;
+      emitDashboardViewState({ activeTab: targetId });
 
       // Update active nav immediately
       navBtns.forEach(b => b.classList.remove('active'));
@@ -897,6 +907,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setDNSRange(range) {
     currentDNSRange = range;
+    emitDashboardViewState({ dnsRange: range });
     
     // Update pill UI
     if (dnsRangePills) {

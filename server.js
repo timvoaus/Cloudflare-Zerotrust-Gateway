@@ -170,6 +170,7 @@ if (DASHBOARD_ALLOWED_ORIGINS.length > 0) {
 }
 
 const io = new Server(httpServer, socketOptions);
+const socketViewState = new Map();
 
 app.use(requireDashboardAccess);
 app.use(express.static(join(__dirname, 'public')));
@@ -1176,6 +1177,7 @@ async function runUnifiedSync(forceFull = false) {
     syncDNSAnalyticsToDatabase(forceFull)
   ]);
   console.log(`[${new Date().toISOString()}] Unified sync complete`);
+  await broadcastActiveDashboardData('live');
 }
 
 setInterval(() => runUnifiedSync(), SYNC_INTERVAL_MS);
@@ -1190,6 +1192,74 @@ function getCutoffForRange(range) {
     case '24h':
     default: return nowSec - 24 * 60 * 60;
   }
+}
+
+function buildDNSAnalyticsDataFromCache(range = '24h') {
+  const cutoffSec = getCutoffForRange(range);
+  const hasData = db.prepare('SELECT 1 FROM dns_timeseries WHERE bucket_ts >= ? LIMIT 1').get(cutoffSec);
+  if (!hasData) return null;
+  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('dns_analytics');
+  const cachedAt = syncState?.last_synced_ts ? new Date(syncState.last_synced_ts * 1000).toISOString() : null;
+  let bucketIntervalSec;
+  switch (range) {
+    case '7d': bucketIntervalSec = 60 * 60; break;
+    case '30d': bucketIntervalSec = 6 * 60 * 60; break;
+    case '24h':
+    default: bucketIntervalSec = 15 * 60; break;
+  }
+  const tsRows = db.prepare(`
+    SELECT 
+      (bucket_ts / ?) * ? as aggregated_bucket,
+      SUM(count) as count
+    FROM dns_timeseries
+    WHERE bucket_ts >= ?
+    GROUP BY aggregated_bucket
+    ORDER BY aggregated_bucket ASC
+  `).all(bucketIntervalSec, bucketIntervalSec, cutoffSec);
+  const timeSeries = tsRows.map(row => ({
+    time: new Date(row.aggregated_bucket * 1000).toISOString(),
+    count: row.count
+  }));
+  const topDomains = db.prepare(`
+    SELECT domain, SUM(count) as total
+    FROM dns_top_domains
+    WHERE bucket_ts >= ?
+    GROUP BY domain
+    ORDER BY total DESC
+    LIMIT 10
+  `).all(cutoffSec).map(r => ({ domain: r.domain, count: r.total }));
+  const topLocations = db.prepare(`
+    SELECT location, SUM(count) as total
+    FROM dns_top_locations
+    WHERE bucket_ts >= ?
+    GROUP BY location
+    ORDER BY total DESC
+    LIMIT 10
+  `).all(cutoffSec).map(r => ({ location: r.location, count: r.total }));
+  const RESOLVER_DECISION_LABELS = {
+    '5': 'Allowed on no policy match',
+    '9': 'Blocked rule',
+    '10': 'Allowed rule',
+  };
+  const resolverDecisions = db.prepare(`
+    SELECT decision, SUM(count) as total
+    FROM dns_resolver_decisions
+    WHERE bucket_ts >= ?
+    GROUP BY decision
+    ORDER BY total DESC
+  `).all(cutoffSec).map(r => ({
+    metric: r.decision,
+    label: RESOLVER_DECISION_LABELS[r.decision] || `Decision ${r.decision}`,
+    count: r.total
+  }));
+  return {
+    timeSeries,
+    totalCount: timeSeries.reduce((sum, item) => sum + (item.count || 0), 0),
+    topDomains,
+    topLocations,
+    resolverDecisions,
+    cachedAt,
+  };
 }
 
 async function buildTrafficMapData(range = '24h') {
@@ -1281,8 +1351,79 @@ async function buildTrafficMapData(range = '24h') {
   };
 }
 
+async function emitTrafficMapData(socket, range = '24h', source = 'cache') {
+  const data = await buildTrafficMapData(range);
+  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('traffic_map');
+  const cachedAt = source === 'live'
+    ? new Date().toISOString()
+    : syncState?.last_synced_ts
+      ? new Date(syncState.last_synced_ts * 1000).toISOString()
+      : null;
+  socket.emit('traffic_map_data', {
+    success: true,
+    ...data,
+    range,
+    source,
+    cachedAt,
+  });
+}
+
+function emitDNSAnalyticsData(socket, range = '24h', source = 'cache') {
+  const cached = buildDNSAnalyticsDataFromCache(range);
+  if (cached) {
+    socket.emit('dns_analytics_data', {
+      success: true,
+      ...cached,
+      range,
+      source,
+      cachedAt: source === 'live' ? new Date().toISOString() : cached.cachedAt,
+    });
+  } else {
+    socket.emit('dns_analytics_data', {
+      success: true,
+      timeSeries: [],
+      totalCount: 0,
+      topDomains: [],
+      topLocations: [],
+      resolverDecisions: [],
+      range,
+      source: 'cache',
+      cachedAt: null,
+    });
+  }
+}
+
+async function broadcastActiveDashboardData(source = 'live') {
+  const tasks = [];
+  for (const socket of io.sockets.sockets.values()) {
+    const state = socketViewState.get(socket.id);
+    if (state?.activeTab === 'dns-analytics') {
+      emitDNSAnalyticsData(socket, state.dnsRange || '24h', source);
+    } else if (state?.activeTab === 'traffic-map') {
+      tasks.push(emitTrafficMapData(socket, state.trafficRange || '24h', source));
+    }
+  }
+  await Promise.allSettled(tasks);
+}
+
 // Socket Communication
 io.on('connection', (socket) => {
+  socketViewState.set(socket.id, { activeTab: 'dns-analytics', dnsRange: '24h', trafficRange: '24h' });
+
+  socket.on('dashboard_view_state', (state = {}) => {
+    const current = socketViewState.get(socket.id) || {};
+    socketViewState.set(socket.id, {
+      ...current,
+      activeTab: state.activeTab || current.activeTab || 'dns-analytics',
+      dnsRange: state.dnsRange || current.dnsRange || '24h',
+      trafficRange: state.trafficRange || current.trafficRange || '24h',
+    });
+  });
+
+  socket.on('disconnect', () => {
+    socketViewState.delete(socket.id);
+  });
+
   socket.on('run_update', async () => {
     console.log("run_update event received!");
     try {
@@ -1694,6 +1835,8 @@ io.on('connection', (socket) => {
   // DNS Analytics API - cache first, then live
   socket.on('get_dns_analytics', async ({ range = '24h', skipLive = false }) => {
     try {
+      const currentState = socketViewState.get(socket.id) || {};
+      socketViewState.set(socket.id, { ...currentState, dnsRange: range });
       // 1. Emit cached data immediately if available
       const cached = getDNSAnalyticsFromCache(range);
       if (cached) {
@@ -1768,32 +1911,11 @@ io.on('connection', (socket) => {
   socket.on('get_traffic_map', async (options = {}) => {
     try {
       const { force, range = '24h' } = options;
-      
-      // 1. Emit cached data immediately
-      const cachedData = await buildTrafficMapData(range);
-      const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('traffic_map');
-      const cachedAt = syncState?.last_synced_ts ? new Date(syncState.last_synced_ts * 1000).toISOString() : null;
-      
-      socket.emit('traffic_map_data', {
-        success: true,
-        ...cachedData,
-        range,
-        source: 'cache',
-        cachedAt,
-      });
-      
-      // 2. If forced, trigger a sync and emit fresh data
-      if (force) {
-        await syncTrafficLogsToDatabase(false);
-        const freshData = await buildTrafficMapData(range);
-        socket.emit('traffic_map_data', {
-          success: true,
-          ...freshData,
-          range,
-          source: 'live',
-          cachedAt: new Date().toISOString(),
-        });
-      }
+      const currentState = socketViewState.get(socket.id) || {};
+      socketViewState.set(socket.id, { ...currentState, trafficRange: range });
+      await emitTrafficMapData(socket, range, 'cache');
+      await syncTrafficLogsToDatabase(false);
+      await emitTrafficMapData(socket, range, 'live');
     } catch (e) {
       console.error('Traffic map error:', e);
       socket.emit('traffic_map_data', { success: false, error: e.message, range: options?.range || '24h' });

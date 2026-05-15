@@ -465,6 +465,7 @@
 
     function setRange(range) {
       currentRange = range;
+      socket.emit('dashboard_view_state', { trafficRange: range });
       
       // Update pill UI
       if (rangePills) {
@@ -530,6 +531,6 @@
       observer.observe(svgEl.parentElement);
     }
 
-    return { load, ensureInitialized, isLoading: () => loadingStarted };
+    return { load, ensureInitialized, isLoading: () => loadingStarted, getRange: () => currentRange };
   };
 })();
