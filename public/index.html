@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#eef5ff">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Cloudflare Zerotrust Gateway Scripts</title>
+  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="traffic-map.css?v=14">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path>
+          </svg>
+        </div>
+        <div>
+          <span class="brand-title">Cloudflare</span>
+          <span class="brand-subtitle">Zerotrust Gateway Scripts</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-btn active" data-target="dns-analytics" data-label="DNS Analytics">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3v18h18"></path>
+            <path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"></path>
+          </svg>
+          <span>DNS Analytics</span>
+        </button>
+        <button class="nav-btn" data-target="traffic-map" data-label="Traffic Map">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M2 12h20"></path>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+          </svg>
+          <span>Traffic Map</span>
+        </button>
+        <button class="nav-btn" data-target="dashboard" data-label="Quick Update">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.59-9.28"></path>
+          </svg>
+          <span>Quick Update</span>
+        </button>
+        <button class="nav-btn" data-target="manage-urls" data-label="Manage URLs">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+          </svg>
+          <span>Manage URLs</span>
+        </button>
+        <button class="nav-btn" data-target="manage-rewrites" data-label="DNS Rewrites">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12h6"></path>
+            <path d="M15 12h6"></path>
+            <path d="M8 7l5 5-5 5"></path>
+          </svg>
+          <span>DNS Rewrites</span>
+        </button>
+        <button class="nav-btn" data-target="manage-allowlist" data-label="Custom Allowlist">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 11l3 3L22 4"></path>
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+          </svg>
+          <span>Custom Allowlist</span>
+        </button>
+        <button class="nav-btn" data-target="manage-denylist" data-label="Custom Denylist">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M8 8l8 8"></path>
+          </svg>
+          <span>Custom Denylist</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="rail-status">
+          <span>Zero Trust DNS</span>
+          <strong>Protected</strong>
+        </div>
+        <button id="btn-full-reset" class="btn-danger">
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+          <span>Full Reset</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="topbar-copy">
+          <h1>Gateway Management</h1>
+        </div>
+        <div class="topbar-right">
+          <span class="current-view" id="current-view-label">DNS Analytics</span>
+          <div class="status-pill" id="connection-status">Connecting...</div>
+        </div>
+      </header>
+
+      <div class="content-sections">
+        <section id="section-dns-analytics" class="section visible active" aria-labelledby="analytics-title">
+          <div class="card analytics-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">Insights</span>
+                <h2 id="analytics-title">DNS Analytics</h2>
+              </div>
+              <div class="card-header-actions">
+                <span class="data-status data-timestamp" id="dns-data-status">Loading...</span>
+                <button id="btn-refresh-analytics" class="btn-primary btn-compact">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M23 4v6h-6"></path>
+                    <path d="M1 20v-6h6"></path>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                  </svg>
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="analytics-grid">
+                <div class="analytics-main">
+                  <div class="stat-header">
+                    <div class="stat-item">
+                      <span class="stat-label">Total Queries</span>
+                      <strong class="stat-value" id="analytics-total-queries">-</strong>
+                    </div>
+                    <div class="stat-item">
+                      <span class="stat-label">Time Period</span>
+                      <div class="stat-period-control">
+                        <div class="range-pills" id="dns-range-pills">
+                          <button class="range-pill active" data-range="24h">24h</button>
+                          <button class="range-pill" data-range="7d">7d</button>
+                          <button class="range-pill" data-range="30d">30d</button>
+                        </div>
+                        <strong class="stat-value" id="analytics-time-period">-</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="chart-container">
+                    <canvas id="dns-queries-chart"></canvas>
+                  </div>
+                </div>
+                <div class="analytics-sidebar">
+                  <div class="top-list top-list-decision">
+                    <h3>By Resolver Decision</h3>
+                    <div class="loading-spinner" id="resolver-decisions-loader" aria-hidden="true"></div>
+                    <div class="resolver-decision-chart">
+                      <canvas id="resolver-decision-chart"></canvas>
+                    </div>
+                    <ul id="resolver-decisions-legend" class="resolver-decision-legend"></ul>
+                  </div>
+                  <div class="top-list">
+                    <h3>Top Domains</h3>
+                    <div class="loading-spinner" id="top-domains-loader" aria-hidden="true"></div>
+                    <ul id="top-domains-list" class="top-list-items"></ul>
+                  </div>
+                  <div class="top-list">
+                    <h3>Top Locations</h3>
+                    <div class="loading-spinner" id="top-locations-loader" aria-hidden="true"></div>
+                    <ul id="top-locations-list" class="top-list-items"></ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-traffic-map" class="section" aria-labelledby="traffic-map-title">
+          <div class="card traffic-map-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">Insights</span>
+                <h2 id="traffic-map-title">Traffic Map</h2>
+              </div>
+              <div class="card-header-actions">
+                <span class="data-status" id="traffic-data-status" hidden></span>
+                <span class="traffic-map-badge data-timestamp" id="traffic-map-updated">Loading...</span>
+                <button id="btn-refresh-traffic-map" class="btn-primary btn-compact">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M23 4v6h-6"></path>
+                    <path d="M1 20v-6h6"></path>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                  </svg>
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+            <div class="card-body traffic-map-body">
+              <div class="traffic-map-stage">
+                <div class="range-pills traffic-map-range-pills" id="traffic-range-pills">
+                  <button class="range-pill active" data-range="24h">24h</button>
+                  <button class="range-pill" data-range="7d">7d</button>
+                  <button class="range-pill" data-range="30d">30d</button>
+                </div>
+                <svg id="traffic-map-svg"></svg>
+                <canvas id="traffic-map-comets" aria-hidden="true"></canvas>
+                <div class="traffic-map-tooltip" id="traffic-map-tooltip"></div>
+                <div class="traffic-map-zoom-btns">
+                  <button class="traffic-map-zoom-btn" id="traffic-map-zoom-in" aria-label="Zoom in">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+                  </button>
+                  <button class="traffic-map-zoom-btn" id="traffic-map-zoom-out" aria-label="Zoom out">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path></svg>
+                  </button>
+                  <button class="traffic-map-zoom-btn" id="traffic-map-zoom-reset" aria-label="Reset zoom">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+                  </button>
+                </div>
+                <div class="traffic-map-loading" id="traffic-map-loading">
+                  <div class="loading-spinner" aria-hidden="true"></div>
+                  <span>Loading traffic map...</span>
+                </div>
+                <div class="traffic-map-error" id="traffic-map-error" hidden>
+                  <strong>Failed to load traffic data</strong>
+                  <p id="traffic-map-error-msg">Unknown error</p>
+                </div>
+              </div>
+              <div class="traffic-map-sidebar analytics-sidebar" id="traffic-map-legend" hidden>
+                <div class="top-list">
+                  <h3>Source Countries</h3>
+                  <div class="traffic-map-legend-list" id="traffic-map-legend-list"></div>
+                </div>
+                <div class="top-list">
+                  <h3>Destination Countries</h3>
+                  <div class="traffic-map-legend-list" id="traffic-map-dest-list"></div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        <section id="section-dashboard" class="section" aria-labelledby="dashboard-title">
+          <div class="dashboard-hero">
+            <div class="hero-copy">
+              <span class="eyebrow">Operations</span>
+              <h2 id="dashboard-title">Quick Update</h2>
+              <p>Sync filter lists, refresh Gateway lists, and update DNS rules.</p>
+            </div>
+            <button id="btn-run-update" class="btn-primary btn-large">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.59-9.28l5.67-5.67"></path>
+              </svg>
+              <span>Run Update</span>
+            </button>
+          </div>
+
+          <div class="insight-grid" aria-label="Update stages">
+            <div class="insight-card">
+              <span>Step 01</span>
+              <strong>Download</strong>
+              <small>Blocklists and allowlists</small>
+            </div>
+            <div class="insight-card">
+              <span>Step 02</span>
+              <strong>Create</strong>
+              <small>Cloudflare Gateway lists</small>
+            </div>
+            <div class="insight-card">
+              <span>Step 03</span>
+              <strong>Deploy</strong>
+              <small>DNS firewall policy</small>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-manage-urls" class="section" aria-labelledby="urls-title">
+          <div class="card editor-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">Sources</span>
+                <h2 id="urls-title">Manage List URLs</h2>
+              </div>
+              <div class="tabs" role="tablist" aria-label="URL type">
+                <button class="tab-btn active" data-type="blocklist" role="tab">Blocklist URLs</button>
+                <button class="tab-btn" data-type="allowlist" role="tab">Allowlist URLs</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="url-editor">
+                <textarea id="url-textarea" rows="10" placeholder="Enter one URL per line..."></textarea>
+                <div class="action-row">
+                  <button id="btn-save-urls" class="btn-primary">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                      <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                      <polyline points="7 3 7 8 15 8"></polyline>
+                    </svg>
+                    <span>Save URLs</span>
+                  </button>
+                  <span id="url-save-status" class="status-msg" aria-live="polite"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-manage-rewrites" class="section" aria-labelledby="rewrites-title">
+          <div class="card rewrites-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">DNS Override</span>
+                <h2 id="rewrites-title">DNS Rewrites</h2>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="allowlist-container">
+                <div class="tool-pane">
+                  <div class="pane-heading">
+                    <h3>Current Rewrites</h3>
+                    <span>Managed rules</span>
+                  </div>
+                  <div class="loading-spinner" id="rewrites-loader" aria-hidden="true"></div>
+                  <ul id="rewrites-ul" class="domain-list rewrite-list"></ul>
+                </div>
+                <div class="tool-pane">
+                  <div class="pane-heading">
+                    <h3>Edit Rewrites</h3>
+                    <span>domain → IP</span>
+                  </div>
+                  <textarea id="rewrites-textarea" rows="8" placeholder="nas.home -> 192.168.1.10&#10;grafana.home -> 192.168.1.20"></textarea>
+                  <div class="action-row">
+                    <button id="btn-save-rewrites" class="btn-primary">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                        <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                        <polyline points="7 3 7 8 15 8"></polyline>
+                      </svg>
+                      <span>Save Rewrites</span>
+                    </button>
+                    <span id="rewrites-save-status" class="status-msg" aria-live="polite"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-manage-allowlist" class="section" aria-labelledby="allowlist-title">
+          <div class="card allowlist-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">Custom Rules</span>
+                <h2 id="allowlist-title">Custom Allowlist</h2>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="allowlist-container">
+                <div class="tool-pane">
+                  <div class="pane-heading">
+                    <h3>Current Domains</h3>
+                  </div>
+                  <div class="loading-spinner" id="allowlist-loader" aria-hidden="true"></div>
+                  <ul id="allowlist-ul" class="domain-list"></ul>
+                </div>
+                <div class="tool-pane">
+                  <div class="pane-heading">
+                    <h3>Add / Remove Domains</h3>
+                    <span>Space or comma separated</span>
+                  </div>
+                  <textarea id="allowlist-textarea" rows="4" placeholder="example.com, internal.example.org"></textarea>
+                  <div class="action-row split-actions">
+                    <button id="btn-allowlist-add" class="btn-primary">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                      </svg>
+                      <span>Add</span>
+                    </button>
+                    <button id="btn-allowlist-remove" class="btn-danger">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                      </svg>
+                      <span>Remove</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-manage-denylist" class="section" aria-labelledby="denylist-title">
+          <div class="card denylist-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">Custom Rules</span>
+                <h2 id="denylist-title">Custom Denylist</h2>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="allowlist-container">
+                <div class="tool-pane">
+                  <div class="pane-heading">
+                    <h3>Current Domains</h3>
+                  </div>
+                  <div class="loading-spinner" id="denylist-loader" aria-hidden="true"></div>
+                  <ul id="denylist-ul" class="domain-list"></ul>
+                </div>
+                <div class="tool-pane">
+                  <div class="pane-heading">
+                    <h3>Add / Remove Domains</h3>
+                    <span>Space or comma separated</span>
+                  </div>
+                  <textarea id="denylist-textarea" rows="4" placeholder="ads.example.com, tracker.example.org"></textarea>
+                  <div class="action-row split-actions">
+                    <button id="btn-denylist-add" class="btn-primary">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                      </svg>
+                      <span>Add</span>
+                    </button>
+                    <button id="btn-denylist-remove" class="btn-danger">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                      </svg>
+                      <span>Remove</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <div class="terminal-container">
+        <div class="terminal-header">
+          <div class="terminal-header-left">
+            <div class="terminal-dots" aria-hidden="true">
+              <span class="terminal-dot red"></span>
+              <span class="terminal-dot yellow"></span>
+              <span class="terminal-dot green"></span>
+            </div>
+            <span class="terminal-label">Terminal Output</span>
+          </div>
+          <button id="btn-clear-term" class="btn-icon" title="Clear terminal" aria-label="Clear terminal">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18"></path>
+              <path d="M8 6V4h8v2"></path>
+              <path d="M19 6l-1 14H6L5 6"></path>
+            </svg>
+          </button>
+        </div>
+        <div id="terminal"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="traffic-map.js?v=14"></script>
+  <script src="script.js?v=49"></script>
+</body>
+</html>

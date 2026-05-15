@@ -1,0 +1,24 @@
+version: "3.8"
+
+# WARNING: The czgs-data volume stores your DNS analytics and traffic map history.
+# This survives: container restarts, image updates, host reboots, 'docker compose restart'.
+# This will DELETE all data: 'docker compose down -v', 'docker volume rm czgs-data'.
+# To preserve data during updates: use 'docker compose pull && docker compose up -d' (NOT down -v).
+
+services:
+  czgs-dashboard:
+    # build: .
+    image: nhutvtm/czgs-dashboard:latest
+    container_name: czgs-dashboard
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    env_file:
+      - .env
+    volumes:
+      # Persist the SQLite DB across container restarts/updates (stores 30 days of analytics)
+      - czgs-data:/usr/src/app/data
+
+volumes:
+  czgs-data:
+    driver: local

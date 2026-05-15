@@ -1,0 +1,13 @@
+node_modules
+.env
+.git
+.gitignore
+README.md
+# Runtime database - persisted via Docker volume, not baked into image
+data/
+# Large list files - downloaded/managed at runtime or by the user
+allowlist.txt
+blocklist.txt
+# Desktop/dev artifacts
+*.backup
+CZGS-Backup*

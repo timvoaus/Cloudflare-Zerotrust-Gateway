@@ -1,0 +1,36 @@
+{
+    "scripts": {
+        "menu": "node menu.js",
+        "start": "npm run download && npm run cloudflare-create",
+        "dry": "node dry_run.js",
+        "download": "node download_lists.js",
+        "download:allowlist": "node download_lists.js allowlist",
+        "download:blocklist": "node download_lists.js blocklist",
+        "cloudflare-refresh": "npm run download && npm run cloudflare-create",
+        "cloudflare-refresh:blocklist": "npm run download:blocklist && npm run cloudflare-create",
+        "cloudflare-create": "npm run cloudflare-create:list && npm run cloudflare-create:rule",
+        "cloudflare-delete": "npm run cloudflare-delete:rule && npm run cloudflare-delete:list",
+        "cloudflare-create:rule": "node cf_gateway_rule_create.js",
+        "cloudflare-create:list": "node cf_list_create.js",
+        "cloudflare-delete:rule": "node cf_gateway_rule_delete.js",
+        "cloudflare-delete:list": "node cf_list_delete.js",
+        "cloudflare-defragment": "node cf_defragment.js",
+        "web": "node --use-system-ca server.js"
+    },
+    "type": "module",
+    "dependencies": {
+        "chart.js": "^4.5.1",
+        "d3": "^7.9.0",
+        "dotenv": "^16.4.7",
+        "express": "^5.2.1",
+        "geoip-lite": "^2.0.2",
+        "puppeteer": "^24.43.0",
+        "socket.io": "^4.8.3",
+        "socket.io-client": "^4.8.3",
+        "topojson-client": "^3.1.0",
+        "world-atlas": "^2.0.2"
+    },
+    "engines": {
+        "node": "24.14.1"
+    }
+}
