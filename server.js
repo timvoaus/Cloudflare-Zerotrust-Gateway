@@ -82,6 +82,47 @@ db.exec(`
     last_synced_ts INTEGER,
     oldest_synced_ts INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS traffic_map_sources (
+    country TEXT PRIMARY KEY,
+    lat REAL NOT NULL,
+    lng REAL NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS traffic_map_destinations (
+    country TEXT PRIMARY KEY,
+    lat REAL NOT NULL,
+    lng REAL NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS traffic_map_routes (
+    source_country TEXT NOT NULL,
+    destination_country TEXT NOT NULL,
+    source_lat REAL NOT NULL,
+    source_lng REAL NOT NULL,
+    destination_lat REAL NOT NULL,
+    destination_lng REAL NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_country, destination_country)
+  );
+
+  CREATE TABLE IF NOT EXISTS traffic_map_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS traffic_map_daily_snapshots (
+    day TEXT PRIMARY KEY,
+    total_queries INTEGER NOT NULL,
+    source_count INTEGER NOT NULL,
+    destination_count INTEGER NOT NULL,
+    route_count INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_traffic_map_daily_snapshots_day ON traffic_map_daily_snapshots(day);
 `);
 
 const app = express();
@@ -920,22 +961,97 @@ async function fetchResolverDecisions() {
 }
 
 const TRAFFIC_MAP_COUNTRY_CENTROIDS = {
-  VN: [16.0583, 108.2772], US: [37.0902, -95.7129], CN: [35.8617, 104.1954],
-  JP: [36.2048, 138.2529], KR: [35.9078, 127.7669], IN: [20.5937, 78.9629],
-  GB: [55.3781, -3.4360], DE: [51.1657, 10.4515], FR: [46.2276, 2.2137],
-  AU: [-25.2744, 133.7751], CA: [56.1304, -106.3468], BR: [-14.2350, -51.9253],
-  RU: [61.5240, 105.3188], SG: [1.3521, 103.8198], HK: [22.3193, 114.1694],
-  TW: [23.6978, 120.9605], TH: [15.8700, 100.9925], ID: [-0.7893, 113.9213],
-  MY: [4.2105, 101.9758], PH: [12.8797, 121.7740], NL: [52.1326, 5.2913],
-  IE: [53.1424, -7.6921], IT: [41.8719, 12.5674], ES: [40.4637, -3.7492],
-  IL: [31.0461, 34.8516], MX: [23.6345, -102.5528], AR: [-38.4161, -63.6167],
-  CL: [-35.6751, -71.5430], ZA: [-30.5595, 22.9375], NG: [9.0820, 8.6753],
-  EG: [26.8206, 30.8025], AE: [23.4241, 53.8478], SA: [23.8859, 45.0792],
-  TR: [38.9637, 35.2433], PL: [51.9194, 19.1451], SE: [60.1282, 18.6435],
-  NO: [60.4720, 8.4689], FI: [61.9241, 25.7482], DK: [56.2639, 9.5018],
-  CH: [46.8182, 8.2275], BE: [50.5039, 4.4699], AT: [47.5162, 14.5501],
-  PT: [39.3999, -8.2245], GR: [39.0742, 21.8243], CZ: [49.8175, 15.4730],
-  UA: [48.3794, 31.1656], RO: [45.9432, 24.9668], NZ: [-40.9006, 174.8860],
+  AD: [42.5462, 1.6016], AE: [23.4241, 53.8478], AF: [33.9391, 67.7100],
+  AG: [17.0608, -61.7964], AL: [41.1533, 20.1683], AM: [40.0691, 45.0382],
+  AO: [-11.2027, 17.8739], AR: [-38.4161, -63.6167], AT: [47.5162, 14.5501],
+  AU: [-25.2744, 133.7751], AZ: [40.1431, 47.5769], BA: [43.9159, 17.6791],
+  BB: [13.1939, -59.5432], BD: [23.6850, 90.3563], BE: [50.5039, 4.4699],
+  BF: [12.2383, -1.5616], BG: [42.7339, 25.4858], BH: [25.9304, 50.6378],
+  BI: [-3.3731, 29.9189], BJ: [9.3077, 2.3158], BN: [4.5353, 114.7277],
+  BO: [-16.2902, -63.5887], BR: [-14.2350, -51.9253], BS: [25.0343, -77.3963],
+  BT: [27.5142, 90.4336], BW: [-22.3285, 24.6849], BY: [53.7098, 27.9534],
+  BZ: [17.1899, -88.4976], CA: [56.1304, -106.3468], CD: [-4.0383, 21.7587],
+  CF: [6.6111, 20.9394], CG: [-0.2280, 15.8277], CH: [46.8182, 8.2275],
+  CI: [7.5400, -5.5471], CL: [-35.6751, -71.5430], CM: [7.3697, 12.3547],
+  CN: [35.8617, 104.1954], CO: [4.5709, -74.2973], CR: [9.7489, -83.7534],
+  CU: [21.5218, -77.7812], CV: [16.5388, -23.0418], CY: [35.1264, 33.4299],
+  CZ: [49.8175, 15.4730], DE: [51.1657, 10.4515], DJ: [11.8251, 42.5903],
+  DK: [56.2639, 9.5018], DM: [15.4150, -61.3710], DO: [18.7357, -70.1627],
+  DZ: [28.0339, 1.6596], EC: [-1.8312, -78.1834], EE: [58.5953, 25.0136],
+  EG: [26.8206, 30.8025], ER: [15.1794, 39.7823], ES: [40.4637, -3.7492],
+  ET: [9.1450, 40.4897], FI: [61.9241, 25.7482], FJ: [-16.5780, 179.4144],
+  FM: [7.4256, 150.5508], FR: [46.2276, 2.2137], GA: [-0.8037, 11.6094],
+  GB: [55.3781, -3.4360], GD: [12.1165, -61.6790], GE: [42.3154, 43.3569],
+  GH: [7.9465, -1.0232], GM: [13.4432, -15.3101], GN: [9.9456, -9.6966],
+  GQ: [1.6508, 10.2679], GR: [39.0742, 21.8243], GT: [15.7835, -90.2308],
+  GW: [11.8037, -15.1801], GY: [4.8604, -58.9302], HK: [22.3193, 114.1694],
+  HN: [15.2000, -86.2419], HR: [45.1000, 15.2000], HT: [18.9712, -72.2852],
+  HU: [47.1625, 19.5033], ID: [-0.7893, 113.9213], IE: [53.1424, -7.6921],
+  IL: [31.0461, 34.8516], IN: [20.5937, 78.9629], IQ: [33.2232, 43.6793],
+  IR: [32.4279, 53.6880], IS: [64.9631, -19.0208], IT: [41.8719, 12.5674],
+  JM: [18.1096, -77.2975], JO: [30.5852, 36.2384], JP: [36.2048, 138.2529],
+  KE: [-0.0236, 37.9062], KG: [41.2044, 74.7661], KH: [12.5657, 104.9910],
+  KI: [-3.3704, -168.7340], KM: [-11.6455, 43.3333], KN: [17.3578, -62.7830],
+  KP: [40.3399, 127.5101], KR: [35.9078, 127.7669], KW: [29.3117, 47.4818],
+  KZ: [48.0196, 66.9237], LA: [19.8563, 102.4955], LB: [33.8547, 35.8623],
+  LC: [13.9094, -60.9789], LI: [47.1660, 9.5554], LK: [7.8731, 80.7718],
+  LR: [6.4281, -9.4295], LS: [-29.6100, 28.2336], LT: [55.1694, 23.8813],
+  LU: [49.8153, 6.1296], LV: [56.8796, 24.6032], LY: [26.3351, 17.2283],
+  MA: [31.7917, -7.0926], MC: [43.7384, 7.4246], MD: [47.4116, 28.3699],
+  ME: [42.7087, 19.3744], MG: [-18.7669, 46.8691], MH: [7.1315, 171.1845],
+  MK: [41.6086, 21.7453], ML: [17.5707, -3.9962], MM: [21.9162, 95.9560],
+  MN: [46.8625, 103.8467], MO: [22.1987, 113.5439], MR: [21.0079, -10.9408],
+  MT: [35.9375, 14.3754], MU: [-20.3484, 57.5522], MV: [3.2028, 73.2207],
+  MW: [-13.2543, 34.3015], MX: [23.6345, -102.5528], MY: [4.2105, 101.9758],
+  MZ: [-18.6657, 35.5296], NA: [-22.9576, 18.4904], NE: [17.6078, 8.0817],
+  NG: [9.0820, 8.6753], NI: [12.8654, -85.2072], NL: [52.1326, 5.2913],
+  NO: [60.4720, 8.4689], NP: [28.3949, 84.1240], NR: [-0.5228, 166.9315],
+  NZ: [-40.9006, 174.8860], OM: [21.4735, 55.9754], PA: [8.5380, -80.7821],
+  PE: [-9.1900, -75.0152], PG: [-6.3149, 143.9555], PH: [12.8797, 121.7740],
+  PK: [30.3753, 69.3451], PL: [51.9194, 19.1451], PT: [39.3999, -8.2245],
+  PW: [7.5150, 134.5825], PY: [-23.4425, -58.4438], QA: [25.3548, 51.1839],
+  RO: [45.9432, 24.9668], RS: [44.0165, 21.0059], RU: [61.5240, 105.3188],
+  RW: [-1.9403, 29.8739], SA: [23.8859, 45.0792], SB: [-9.6457, 160.1562],
+  SC: [-4.6796, 55.4920], SD: [12.8628, 30.2176], SE: [60.1282, 18.6435],
+  SG: [1.3521, 103.8198], SI: [46.1512, 14.9955], SK: [48.6690, 19.6990],
+  SL: [8.4606, -11.7799], SM: [43.9424, 12.4578], SN: [14.4974, -14.4524],
+  SO: [5.1521, 46.1996], SR: [3.9193, -56.0278], SS: [6.8770, 31.3070],
+  ST: [0.1864, 6.6131], SV: [13.7942, -88.8965], SY: [34.8021, 38.9968],
+  SZ: [-26.5225, 31.4659], TD: [15.4542, 18.7322], TG: [8.6195, 0.8248],
+  TH: [15.8700, 100.9925], TJ: [38.8610, 71.2761], TL: [-8.8742, 125.7275],
+  TM: [38.9697, 59.5563], TN: [33.8869, 9.5375], TO: [-21.1789, -175.1982],
+  TR: [38.9637, 35.2433], TT: [10.6918, -61.2225], TV: [-7.1095, 177.6493],
+  TW: [23.6978, 120.9605], TZ: [-6.3690, 34.8888], UA: [48.3794, 31.1656],
+  UG: [1.3733, 32.2903], US: [37.0902, -95.7129], UY: [-32.5228, -55.7658],
+  UZ: [41.3775, 64.5853], VA: [41.9029, 12.4534], VC: [12.9843, -61.2872],
+  VE: [6.4238, -66.5897], VN: [16.0583, 108.2772], VU: [-15.3767, 166.9592],
+  WS: [-13.7590, -172.1046], XK: [42.6026, 20.9030], YE: [15.5527, 48.5164],
+  ZA: [-30.5595, 22.9375], ZM: [-13.1339, 27.8493], ZW: [-19.0154, 29.1549],
+  AI: [18.2206, -63.0686], AQ: [-82.8628, 135.0000], AS: [-14.2710, -170.1322],
+  AW: [12.5211, -69.9683], AX: [60.1785, 19.9156], BL: [17.9000, -62.8333],
+  BM: [32.3078, -64.7505], BQ: [12.1784, -68.2385], BV: [-54.4208, 3.3464],
+  CC: [-12.1642, 96.8710], CK: [-21.2367, -159.7777], CW: [12.1696, -68.9900],
+  CX: [-10.4475, 105.6904], EH: [24.2155, -12.8858], FK: [-51.7963, -59.5236],
+  FO: [61.8926, -6.9118], GF: [3.9339, -53.1258], GG: [49.4657, -2.5853],
+  GI: [36.1408, -5.3536], GL: [71.7069, -42.6043], GP: [16.9950, -62.0673],
+  GS: [-54.4296, -36.5879], GU: [13.4443, 144.7937], HM: [-53.0818, 73.5042],
+  IM: [54.2361, -4.5481], IO: [-6.3432, 71.8765], JE: [49.2144, -2.1313],
+  KY: [19.3133, -81.2546], MF: [18.0708, -63.0501], MP: [17.3308, 145.3846],
+  MQ: [14.6415, -61.0242], MS: [16.7425, -62.1874], NC: [-20.9043, 165.6180],
+  NF: [-29.0408, 167.9547], NU: [-19.0544, -169.8672], PF: [-17.6797, -149.4068],
+  PM: [46.9419, -56.2711], PN: [-24.7036, -127.4393], PR: [18.2208, -66.5901],
+  PS: [31.9522, 35.2332], RE: [-21.1151, 55.5364], SH: [-24.1437, -10.0307],
+  SJ: [77.5536, 23.6703], SX: [18.0425, -63.0548], TC: [21.6940, -71.7979],
+  TF: [-49.2804, 69.3486], TK: [-8.9676, -171.8559], UM: [19.2823, 166.6470],
+  VG: [18.4207, -64.6400], VI: [18.3358, -64.8963], WF: [-13.7687, -177.1561],
+  YT: [-12.8275, 45.1662], AC: [-7.9467, -14.3559], CP: [10.2833, -109.2167],
+  DG: [-7.3133, 72.4111], EA: [35.8894, -5.3213], IC: [28.2916, -16.6291],
+  TA: [-37.1052, -12.2777], UK: [55.3781, -3.4360], AN: [12.2261, -69.0600],
+  CS: [44.0165, 21.0059], YU: [44.0165, 21.0059], SU: [61.5240, 105.3188],
+  TP: [-8.8742, 125.7275], ZR: [-4.0383, 21.7587], BU: [21.9162, 95.9560],
+  EU: [50.0000, 10.0000], AP: [10.0000, 120.0000], T1: [-38.0000, -25.0000],
+  A1: [-40.0000, -20.0000], A2: [-42.0000, -15.0000], O1: [-44.0000, -10.0000],
+  XX: [-46.0000, -5.0000],
 };
 
 function readPositiveIntegerEnv(name, fallback) {
@@ -944,6 +1060,9 @@ function readPositiveIntegerEnv(name, fallback) {
 }
 
 const TRAFFIC_MAP_HOURS = readPositiveIntegerEnv('TRAFFIC_MAP_HOURS', 24);
+const TRAFFIC_MAP_GRAPHQL_HOURS = Math.min(TRAFFIC_MAP_HOURS, 24);
+const TRAFFIC_MAP_ROW_LIMIT = readPositiveIntegerEnv('TRAFFIC_MAP_ROW_LIMIT', 10000);
+const TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS = readPositiveIntegerEnv('TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS', 300);
 const TRAFFIC_MAP_ACTIVITY_LIMIT = readPositiveIntegerEnv('TRAFFIC_MAP_ACTIVITY_LIMIT', 5000);
 const TRAFFIC_MAP_MAX_ACTIVITY_PAGES = readPositiveIntegerEnv('TRAFFIC_MAP_MAX_ACTIVITY_PAGES', 20);
 const TRAFFIC_MAP_ACTIVITY_FIELDS = [
@@ -1002,6 +1121,265 @@ async function fetchGatewayActivityPage(paramsBase, page) {
   }
 
   return Array.isArray(data.result?.logs) ? data.result.logs : [];
+}
+
+const TRAFFIC_MAP_GRAPHQL_QUERY = `
+query TrafficMap($acct: string!, $start: Time!, $end: Time!, $rowLimit: Int!) {
+  viewer {
+    accounts(filter: { accountTag: $acct }) {
+      total: gatewayResolverQueriesAdaptiveGroups(
+        filter: { datetime_geq: $start, datetime_leq: $end }
+        limit: 1
+      ) { count }
+      sources: gatewayResolverQueriesAdaptiveGroups(
+        filter: { datetime_geq: $start, datetime_leq: $end }
+        limit: $rowLimit
+        orderBy: [count_DESC]
+      ) { count dimensions { srcIpCountry } }
+      destinations: gatewayResolverQueriesAdaptiveGroups(
+        filter: { datetime_geq: $start, datetime_leq: $end }
+        limit: $rowLimit
+        orderBy: [count_DESC]
+      ) { count dimensions { resolvedIpCountries } }
+      routes: gatewayResolverQueriesAdaptiveGroups(
+        filter: { datetime_geq: $start, datetime_leq: $end }
+        limit: $rowLimit
+        orderBy: [count_DESC]
+      ) { count dimensions { srcIpCountry resolvedIpCountries } }
+    }
+  }
+}`;
+
+function uniqueTrafficMapCountries(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  for (const value of list) {
+    const country = normalizeCountryCode(value);
+    if (country) seen.add(country);
+  }
+  return [...seen];
+}
+
+async function fetchTrafficMapGraphQLAggregate() {
+  if (!ACCOUNT_ID || !API_TOKEN) {
+    throw new Error('Traffic map GraphQL sync skipped: missing ACCOUNT_ID or API_TOKEN');
+  }
+
+  const end = new Date();
+  const start = new Date(end.getTime() - TRAFFIC_MAP_GRAPHQL_HOURS * 60 * 60 * 1000);
+  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${API_TOKEN}`,
+    },
+    body: JSON.stringify({
+      query: TRAFFIC_MAP_GRAPHQL_QUERY,
+      variables: {
+        acct: ACCOUNT_ID,
+        start: start.toISOString(),
+        end: end.toISOString(),
+        rowLimit: TRAFFIC_MAP_ROW_LIMIT,
+      },
+    }),
+  });
+  const data = await response.json();
+
+  if (!response.ok || data.errors) {
+    throw new Error(`Traffic map GraphQL error: ${JSON.stringify(data.errors || data)}`);
+  }
+
+  const account = data.data?.viewer?.accounts?.[0];
+  if (!account) throw new Error('Traffic map GraphQL error: no account node returned');
+
+  return {
+    totalQueries: account.total?.[0]?.count || 0,
+    rawSources: account.sources || [],
+    rawDestinations: account.destinations || [],
+    rawRoutes: account.routes || [],
+    windowStart: start.toISOString(),
+    windowEnd: end.toISOString(),
+  };
+}
+
+function aggregateTrafficMapGraphQLRows(raw) {
+  const sources = new Map();
+  const destinations = new Map();
+  const routes = new Map();
+  const unmapped = new Map();
+  const noteUnmapped = country => {
+    if (country) unmapped.set(country, (unmapped.get(country) || 0) + 1);
+  };
+
+  for (const row of raw.rawSources) {
+    const country = normalizeCountryCode(row.dimensions?.srcIpCountry);
+    if (!country) continue;
+    const point = countryPoint(country);
+    if (point.lat == null || point.lng == null) {
+      noteUnmapped(country);
+      continue;
+    }
+    sources.set(country, (sources.get(country) || 0) + (row.count || 0));
+  }
+
+  for (const row of raw.rawDestinations) {
+    const countries = uniqueTrafficMapCountries(row.dimensions?.resolvedIpCountries);
+    for (const country of countries) {
+      const point = countryPoint(country);
+      if (point.lat == null || point.lng == null) {
+        noteUnmapped(country);
+        continue;
+      }
+      destinations.set(country, (destinations.get(country) || 0) + (row.count || 0));
+    }
+  }
+
+  for (const row of raw.rawRoutes) {
+    const sourceCountry = normalizeCountryCode(row.dimensions?.srcIpCountry);
+    const destinationCountries = uniqueTrafficMapCountries(row.dimensions?.resolvedIpCountries);
+    if (!sourceCountry || destinationCountries.length === 0) continue;
+    const sourcePoint = countryPoint(sourceCountry);
+    if (sourcePoint.lat == null || sourcePoint.lng == null) {
+      noteUnmapped(sourceCountry);
+      continue;
+    }
+
+    for (const destinationCountry of destinationCountries) {
+      if (destinationCountry === sourceCountry) continue;
+      const destinationPoint = countryPoint(destinationCountry);
+      if (destinationPoint.lat == null || destinationPoint.lng == null) {
+        noteUnmapped(destinationCountry);
+        continue;
+      }
+      const key = `${sourceCountry}->${destinationCountry}`;
+      const current = routes.get(key);
+      if (current) {
+        current.count += row.count || 0;
+      } else {
+        routes.set(key, {
+          sourceCountry,
+          sourceLat: sourcePoint.lat,
+          sourceLng: sourcePoint.lng,
+          destinationCountry,
+          destinationLat: destinationPoint.lat,
+          destinationLng: destinationPoint.lng,
+          count: row.count || 0,
+        });
+      }
+    }
+  }
+
+  return {
+    sources: [...sources.entries()].map(([country, count]) => {
+      const point = countryPoint(country);
+      return { country, lat: point.lat, lng: point.lng, count };
+    }).sort((a, b) => b.count - a.count),
+    destinations: [...destinations.entries()].map(([country, count]) => {
+      const point = countryPoint(country);
+      return { country, lat: point.lat, lng: point.lng, count };
+    }).sort((a, b) => b.count - a.count),
+    routes: [...routes.values()].sort((a, b) => b.count - a.count),
+    unmappedCountries: [...unmapped.entries()].sort((a, b) => b[1] - a[1]).map(([country, hits]) => ({ country, hits })),
+  };
+}
+
+function writeTrafficMapAggregate(agg, summary) {
+  db.exec('BEGIN TRANSACTION');
+  try {
+    db.exec('DELETE FROM traffic_map_sources; DELETE FROM traffic_map_destinations; DELETE FROM traffic_map_routes;');
+    const insertSource = db.prepare('INSERT INTO traffic_map_sources (country, lat, lng, count) VALUES (?, ?, ?, ?)');
+    const insertDestination = db.prepare('INSERT INTO traffic_map_destinations (country, lat, lng, count) VALUES (?, ?, ?, ?)');
+    const insertRoute = db.prepare(`
+      INSERT INTO traffic_map_routes
+        (source_country, destination_country, source_lat, source_lng, destination_lat, destination_lng, count)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const source of agg.sources) insertSource.run(source.country, source.lat, source.lng, source.count);
+    for (const destination of agg.destinations) insertDestination.run(destination.country, destination.lat, destination.lng, destination.count);
+    for (const route of agg.routes) {
+      insertRoute.run(
+        route.sourceCountry,
+        route.destinationCountry,
+        route.sourceLat,
+        route.sourceLng,
+        route.destinationLat,
+        route.destinationLng,
+        route.count
+      );
+    }
+    db.prepare(`
+      INSERT INTO traffic_map_meta (key, value) VALUES ('last_refresh', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify(summary));
+    db.prepare(`
+      INSERT INTO sync_state (key, last_synced_ts, oldest_synced_ts)
+      VALUES ('traffic_map_graphql', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET last_synced_ts = excluded.last_synced_ts, oldest_synced_ts = excluded.oldest_synced_ts
+    `).run(Math.floor(Date.now() / 1000), Math.floor(new Date(summary.window.from).getTime() / 1000));
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+function upsertTrafficMapDailySnapshot(agg, totalQueries) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const day = new Date().toISOString().slice(0, 10);
+  const payload = JSON.stringify({
+    sources: agg.sources,
+    destinations: agg.destinations,
+    routes: agg.routes,
+  });
+  db.prepare(`
+    INSERT INTO traffic_map_daily_snapshots
+      (day, total_queries, source_count, destination_count, route_count, payload, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(day) DO UPDATE SET
+      total_queries = excluded.total_queries,
+      source_count = excluded.source_count,
+      destination_count = excluded.destination_count,
+      route_count = excluded.route_count,
+      payload = excluded.payload,
+      updated_at = excluded.updated_at
+  `).run(day, totalQueries, agg.sources.length, agg.destinations.length, agg.routes.length, payload, nowSec);
+  db.prepare("DELETE FROM traffic_map_daily_snapshots WHERE day < date('now', '-30 days')").run();
+}
+
+let isTrafficMapGraphQLSyncing = false;
+function isTrafficMapGraphQLSyncFresh() {
+  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('traffic_map_graphql');
+  if (!syncState?.last_synced_ts) return false;
+  const ageSeconds = Math.floor(Date.now() / 1000) - syncState.last_synced_ts;
+  return ageSeconds >= 0 && ageSeconds < TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS;
+}
+
+async function syncTrafficMapAggregatesToDatabase() {
+  if (isTrafficMapGraphQLSyncing) return;
+  isTrafficMapGraphQLSyncing = true;
+  try {
+    const start = Date.now();
+    const raw = await fetchTrafficMapGraphQLAggregate();
+    const aggregate = aggregateTrafficMapGraphQLRows(raw);
+    const summary = {
+      totalQueries: raw.totalQueries,
+      sources: aggregate.sources.length,
+      destinations: aggregate.destinations.length,
+      routes: aggregate.routes.length,
+      unmappedCountries: aggregate.unmappedCountries,
+      window: { from: raw.windowStart, to: raw.windowEnd },
+      durationMs: Date.now() - start,
+      updatedAt: new Date().toISOString(),
+    };
+    writeTrafficMapAggregate(aggregate, summary);
+    upsertTrafficMapDailySnapshot(aggregate, raw.totalQueries);
+    console.log(`Traffic map GraphQL sync complete. Total queries: ${raw.totalQueries}, sources: ${aggregate.sources.length}, destinations: ${aggregate.destinations.length}, routes: ${aggregate.routes.length}`);
+  } catch (err) {
+    console.error('Traffic map GraphQL sync failed:', err);
+    throw err;
+  } finally {
+    isTrafficMapGraphQLSyncing = false;
+  }
 }
 
 let isSyncing = false;
@@ -1411,7 +1789,7 @@ function buildDNSAnalyticsDataFromCache(range = '24h') {
   };
 }
 
-async function buildTrafficMapData(range = '24h') {
+function buildTrafficMapDataFromLogs(range = '24h') {
   const cutoffSec = getCutoffForRange(range);
   const stmt = db.prepare('SELECT * FROM logs WHERE datetime >= ?');
   const dbLogs = stmt.all(cutoffSec);
@@ -1500,14 +1878,156 @@ async function buildTrafficMapData(range = '24h') {
   };
 }
 
+function readTrafficMapLastRefresh() {
+  const row = db.prepare("SELECT value FROM traffic_map_meta WHERE key = 'last_refresh'").get();
+  if (!row?.value) return null;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return null;
+  }
+}
+
+function mergeTrafficMapItems(map, item) {
+  const current = map.get(item.country);
+  if (current) {
+    current.count += item.count || 0;
+  } else {
+    map.set(item.country, { ...item, count: item.count || 0 });
+  }
+}
+
+function mergeTrafficMapRoute(map, route) {
+  if (!route.sourceCountry || !route.destinationCountry) return;
+  const key = `${route.sourceCountry}->${route.destinationCountry}`;
+  const current = map.get(key);
+  if (current) {
+    current.count += route.count || 0;
+  } else {
+    map.set(key, { ...route, count: route.count || 0 });
+  }
+}
+
+function readTrafficMapDailyHistory() {
+  return db.prepare(`
+    SELECT day, total_queries, source_count, destination_count, route_count
+    FROM traffic_map_daily_snapshots
+    WHERE day >= date('now', '-30 days')
+    ORDER BY day ASC
+  `).all().map(row => ({
+    day: row.day,
+    totalQueries: row.total_queries,
+    sourceCount: row.source_count,
+    destinationCount: row.destination_count,
+    routeCount: row.route_count,
+  }));
+}
+
+function buildTrafficMapDataFromAggregateTables() {
+  const sources = db.prepare('SELECT country, lat, lng, count FROM traffic_map_sources ORDER BY count DESC').all();
+  const destinations = db.prepare('SELECT country, lat, lng, count FROM traffic_map_destinations ORDER BY count DESC').all();
+  const routes = db.prepare(`
+    SELECT source_country, destination_country, source_lat, source_lng, destination_lat, destination_lng, count
+    FROM traffic_map_routes
+    ORDER BY count DESC
+  `).all().map(row => ({
+    sourceCountry: row.source_country,
+    sourceLat: row.source_lat,
+    sourceLng: row.source_lng,
+    destinationCountry: row.destination_country,
+    destinationLat: row.destination_lat,
+    destinationLng: row.destination_lng,
+    count: row.count,
+  }));
+  const lastRefresh = readTrafficMapLastRefresh();
+
+  if (sources.length === 0 && destinations.length === 0 && routes.length === 0) return null;
+
+  return {
+    sources,
+    destinations,
+    routes,
+    totalQueries: sources.reduce((sum, source) => sum + (source.count || 0), 0),
+    dailyHistory: readTrafficMapDailyHistory(),
+    lastRefresh,
+    dataRange: lastRefresh?.window ? { oldest: lastRefresh.window.from, latest: lastRefresh.window.to } : null,
+    logsCount: sources.reduce((sum, source) => sum + (source.count || 0), 0),
+    updatedAt: Date.now(),
+  };
+}
+
+function buildTrafficMapDataFromDailySnapshots(range = '7d') {
+  const days = range === '30d' ? 30 : 7;
+  const rows = db.prepare(`
+    SELECT day, payload, updated_at, total_queries
+    FROM traffic_map_daily_snapshots
+    WHERE day >= date('now', ?)
+    ORDER BY day ASC
+  `).all(`-${days - 1} days`);
+
+  if (rows.length === 0) return null;
+
+  const sources = new Map();
+  const destinations = new Map();
+  const routes = new Map();
+  let totalQueries = 0;
+
+  for (const row of rows) {
+    totalQueries += row.total_queries || 0;
+    let payload;
+    try {
+      payload = JSON.parse(row.payload);
+    } catch {
+      continue;
+    }
+    for (const source of payload.sources || []) mergeTrafficMapItems(sources, source);
+    for (const destination of payload.destinations || []) mergeTrafficMapItems(destinations, destination);
+    for (const route of payload.routes || []) {
+      mergeTrafficMapRoute(routes, {
+        sourceCountry: route.sourceCountry ?? route.source_country,
+        sourceLat: route.sourceLat ?? route.source_lat,
+        sourceLng: route.sourceLng ?? route.source_lng,
+        destinationCountry: route.destinationCountry ?? route.destination_country,
+        destinationLat: route.destinationLat ?? route.destination_lat,
+        destinationLng: route.destinationLng ?? route.destination_lng,
+        count: route.count || 0,
+      });
+    }
+  }
+
+  return {
+    sources: [...sources.values()].sort((a, b) => b.count - a.count),
+    destinations: [...destinations.values()].sort((a, b) => b.count - a.count),
+    routes: [...routes.values()].sort((a, b) => b.count - a.count),
+    totalQueries,
+    dailyHistory: readTrafficMapDailyHistory(),
+    lastRefresh: readTrafficMapLastRefresh(),
+    dataRange: {
+      oldest: `${rows[0].day}T00:00:00Z`,
+      latest: `${rows[rows.length - 1].day}T23:59:59Z`,
+    },
+    logsCount: totalQueries,
+    updatedAt: Date.now(),
+  };
+}
+
+async function buildTrafficMapData(range = '24h') {
+  const aggregateData = range === '24h'
+    ? buildTrafficMapDataFromAggregateTables()
+    : buildTrafficMapDataFromDailySnapshots(range);
+  if (aggregateData) return aggregateData;
+  return buildTrafficMapDataFromLogs(range);
+}
+
 async function emitTrafficMapData(socket, range = '24h', source = 'cache') {
   const data = await buildTrafficMapData(range);
-  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('traffic_map');
+  const lastRefresh = readTrafficMapLastRefresh();
+  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get(lastRefresh ? 'traffic_map_graphql' : 'traffic_map');
   const cachedAt = source === 'live'
     ? new Date().toISOString()
-    : syncState?.last_synced_ts
+    : lastRefresh?.updatedAt || (syncState?.last_synced_ts
       ? new Date(syncState.last_synced_ts * 1000).toISOString()
-      : null;
+      : null);
   socket.emit('traffic_map_data', {
     success: true,
     ...data,
@@ -2053,7 +2573,14 @@ io.on('connection', (socket) => {
       const currentState = socketViewState.get(socket.id) || {};
       socketViewState.set(socket.id, { ...currentState, trafficRange: range });
       await emitTrafficMapData(socket, range, 'cache');
-      await syncTrafficLogsToDatabase(false);
+      if (force || !isTrafficMapGraphQLSyncFresh()) {
+        try {
+          await syncTrafficMapAggregatesToDatabase();
+        } catch (syncError) {
+          console.warn('Traffic map GraphQL sync failed; falling back to raw activity log sync:', syncError.message);
+          await syncTrafficLogsToDatabase(Boolean(force));
+        }
+      }
       await emitTrafficMapData(socket, range, 'live');
     } catch (e) {
       console.error('Traffic map error:', e);
