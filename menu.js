@@ -148,18 +148,43 @@ const printMenu = () => {
 // ══════════════════════════════════════════════════════════════════════════════
 // Option 1 — Update
 // ══════════════════════════════════════════════════════════════════════════════
+function formatDuration(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
 async function optionUpdate() {
   console.log(fmt.title("Update"));
+  const started = Date.now();
+  const phaseMs = { download: 0, process: 0, rule: 0 };
 
+  let phaseStart = Date.now();
   console.log(fmt.step("Downloading latest block / allow lists…"));
   await runScript(["download_lists.js"]);
+  phaseMs.download = Date.now() - phaseStart;
 
+  phaseStart = Date.now();
   console.log(`\n${fmt.step("Syncing lists in Cloudflare Gateway…")}`);
   await runScript(["cf_list_create.js"]);
+  phaseMs.process = Date.now() - phaseStart;
 
+  phaseStart = Date.now();
   console.log(`\n${fmt.step("Upserting gateway firewall rule…")}`);
   await runScript(["cf_gateway_rule_create.js"]);
+  phaseMs.rule = Date.now() - phaseStart;
 
+  const totalMs = Date.now() - started;
+  console.log(
+    fmt.info(
+      `Timing — Download: ${formatDuration(phaseMs.download)} | ` +
+        `Process: ${formatDuration(phaseMs.process)} | ` +
+        `Rule: ${formatDuration(phaseMs.rule)} | ` +
+        `Total: ${formatDuration(totalMs)}`
+    )
+  );
   console.log(`\n${fmt.ok("Update complete!")}`);
 }
 

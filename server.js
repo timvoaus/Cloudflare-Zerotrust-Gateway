@@ -67,6 +67,7 @@ import { fileURLToPath } from 'url';
 import geoip from 'geoip-lite';
 import { DatabaseSync } from 'node:sqlite';
 import { getEnvPath } from './lib/env.js';
+import { loadManifest } from './lib/sync-manifest.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -257,6 +258,34 @@ try {
 
 const startTime = Date.now();
 
+function formatDuration(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s`;
+}
+
+function getLastSyncInfo() {
+  const manifest = loadManifest();
+  const listSyncAt = manifest?.generatedAt ?? null;
+
+  let trafficMapAt = null;
+  try {
+    const row = db.prepare(
+      "SELECT last_synced_ts FROM sync_state WHERE key = 'traffic_map_graphql'"
+    ).get();
+    if (row?.last_synced_ts) {
+      trafficMapAt = new Date(row.last_synced_ts * 1000).toISOString();
+    }
+  } catch {
+    // sync_state may not exist yet
+  }
+
+  return { listSyncAt, trafficMapAt };
+}
+
 app.get('/api/health', (req, res) => {
   // Check database writability
   let databaseWritable = false;
@@ -272,6 +301,8 @@ app.get('/api/health', (req, res) => {
     ok: true,
     cloudflareConfigured: !!(API_TOKEN && ACCOUNT_ID),
     databaseWritable,
+    dataDir: DATA_DIR,
+    lastSync: getLastSyncInfo(),
     uptime: Math.floor((Date.now() - startTime) / 1000),
     version: appVersion,
   };
@@ -577,30 +608,32 @@ async function syncTrafficLogsToDatabase(forceFull = false) {
     console.log(`Sync finished API fetch. Total logs: ${fetchedLogs.length}`);
 
     if (fetchedLogs.length > 0) {
-      const insert = db.prepare(`
-        INSERT OR IGNORE INTO logs (query_id, datetime, src_country, src_country_code, source_ip, resolved_ips)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      
+      const validLogs = fetchedLogs.filter((log) => log.query_id);
+      const BATCH_SIZE = 500;
+
       db.exec('BEGIN TRANSACTION');
       try {
-        for (const log of fetchedLogs) {
-          if (!log.query_id) continue;
-          insert.run(
+        for (let i = 0; i < validLogs.length; i += BATCH_SIZE) {
+          const batch = validLogs.slice(i, i + BATCH_SIZE);
+          const placeholders = batch.map(() => '(?,?,?,?,?,?)').join(',');
+          const values = batch.flatMap((log) => [
             log.query_id,
             log.datetime || null,
             log.src_country || null,
             log.src_country_code || null,
             log.source_ip || null,
-            JSON.stringify(log.resolved_ips || [])
-          );
+            JSON.stringify(log.resolved_ips || []),
+          ]);
+          db.prepare(`
+            INSERT OR IGNORE INTO logs (query_id, datetime, src_country, src_country_code, source_ip, resolved_ips)
+            VALUES ${placeholders}
+          `).run(...values);
         }
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
         throw e;
       }
-      
     }
     
     // Update sync state for traffic map
@@ -793,13 +826,24 @@ io.on('connection', (socket) => {
 
   socket.on('run_update', async () => {
     console.log("run_update event received!");
+    const updateStarted = Date.now();
+    const phaseMs = { download: 0, process: 0, rule: 0, defrag: 0 };
     try {
+      let phaseStart = Date.now();
       await runScript(["download_lists.js"], socket);
+      phaseMs.download = Date.now() - phaseStart;
+
+      phaseStart = Date.now();
       await runScript(["cf_list_create.js"], socket);
+      phaseMs.process = Date.now() - phaseStart;
+
+      phaseStart = Date.now();
       await runScript(["cf_gateway_rule_create.js"], socket);
+      phaseMs.rule = Date.now() - phaseStart;
       
       // Auto-defragment after sync (if enabled) to clean up any empty lists
       if (CZGS_AUTO_DEFRAGMENT) {
+        phaseStart = Date.now();
         socket.emit('log', "\n\x1b[36m--- Running Auto-Defragment ---\x1b[0m\n");
         const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists();
         
@@ -814,9 +858,22 @@ io.on('connection', (socket) => {
         } else {
           socket.emit('log', "\x1b[32mNo empty lists found - defragment skipped\x1b[0m\n");
         }
+        phaseMs.defrag = Date.now() - phaseStart;
       } else {
         socket.emit('log', "\n\x1b[33mAuto-defragment disabled (set CZGS_AUTO_DEFRAGMENT=1 to enable)\x1b[0m\n");
       }
+
+      const totalMs = Date.now() - updateStarted;
+      const defragPart = phaseMs.defrag
+        ? ` | Defragment: ${formatDuration(phaseMs.defrag)}`
+        : "";
+      const summary =
+        `\x1b[32mTiming — Download: ${formatDuration(phaseMs.download)} | ` +
+        `Process: ${formatDuration(phaseMs.process)} | ` +
+        `Rule: ${formatDuration(phaseMs.rule)}${defragPart} | ` +
+        `Total: ${formatDuration(totalMs)}\x1b[0m\n`;
+      socket.emit("log", summary);
+      console.log(summary.replace(/\x1b\[[0-9;]*m/g, ""));
     } catch (err) {
       socket.emit("log", `\x1b[31mError during update: ${err.message}\x1b[0m\n`);
     } finally {

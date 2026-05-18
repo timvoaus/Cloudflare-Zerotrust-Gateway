@@ -21,8 +21,19 @@ This project builds on the backend foundation provided by [`mrrfv/cloudflare-gat
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Complete environment variable reference |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
 | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Development roadmap and technical notes |
+| [docs/TESTING.md](docs/TESTING.md) | Manual test checklist |
 
 **Quick Start:** See [Requirements](#requirements) and [Quick Start With Docker](#quick-start-with-docker) below to get running in minutes.
+
+## Deploy scenarios
+
+| Scenario | `HOST` | `DASHBOARD_PASSWORD` | Notes |
+|----------|--------|----------------------|-------|
+| Laptop only | `127.0.0.1` (default) | Leave empty | http://localhost:3333 — no login |
+| Home server / Docker | `0.0.0.0` | **Set a strong password** | Do not expose port 3333 to the public internet without protection |
+| Cloudflare Tunnel + Access | `127.0.0.1` | Optional if Access protects the URL | Prefer Tunnel over raw port forwarding |
+
+**Typical update time:** First run (download + full Cloudflare sync) often takes several minutes depending on list size and API rate limits. Repeat runs with unchanged lists are much faster when `CZGS_SKIP_SYNC_IF_UNCHANGED=1` (default).
 
 ## Web Interface
 
@@ -179,6 +190,11 @@ The dashboard exposes a health check endpoint at `GET /api/health` for Docker an
   "ok": true,
   "cloudflareConfigured": true,
   "databaseWritable": true,
+  "dataDir": "/usr/src/app/data",
+  "lastSync": {
+    "listSyncAt": "2026-05-18T12:00:00.000Z",
+    "trafficMapAt": "2026-05-18T11:55:00.000Z"
+  },
   "uptime": 3600,
   "version": "1.0.0"
 }
@@ -188,6 +204,9 @@ The dashboard exposes a health check endpoint at `GET /api/health` for Docker an
 - `ok`: Always `true` if the service is responding
 - `cloudflareConfigured`: `true` if `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set
 - `databaseWritable`: `true` if the SQLite database is accessible
+- `dataDir`: Path to the local data directory (SQLite, sync manifest)
+- `lastSync.listSyncAt`: ISO timestamp from the last successful list sync manifest (if any)
+- `lastSync.trafficMapAt`: ISO timestamp from the last traffic-map GraphQL sync (if any)
 - `uptime`: Seconds since the server started
 - `version`: Application version from `package.json`
 
