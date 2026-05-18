@@ -78,9 +78,10 @@ TRAFFIC_MAP_ROW_LIMIT=10000
 TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS=300
 ```
 
-Run the published image:
+Build and run your own local image:
 
 ```bash
+docker build -t czgs-dashboard:local .
 docker run -d \
   --name czgs-dashboard \
   -p 3333:3333 \
@@ -89,7 +90,7 @@ docker run -d \
   -e CZGS_ENV_PATH=/usr/src/app/data/.env \
   -v czgs-data:/usr/src/app/data \
   --restart unless-stopped \
-  nhutvtm/czgs-dashboard:latest
+  czgs-dashboard:local
 ```
 
 Open:
@@ -104,17 +105,13 @@ Traffic map aggregates and daily snapshots are stored in SQLite under `CZGS_DATA
 
 ## Docker Compose
 
-Create `.env` first, then run:
-
-```bash
-docker compose up -d
-```
-
-The included `docker-compose.yml` is configured to build locally from source by default to ensure you have the latest updates. Just run:
+Create `.env` first, then build and run from source:
 
 ```bash
 docker compose up -d --build
 ```
+
+The included `docker-compose.yml` builds locally from this repository. It does not pull a Docker Hub image.
 
 ## Local Node.js Setup
 
@@ -243,11 +240,11 @@ These files are generated locally and should not be committed:
 ## Build Your Own Image
 
 ```bash
-docker build -t czgs-dashboard .
+docker build -t czgs-dashboard:local .
 docker run -d \
   --name czgs-dashboard \
   -p 3333:3333 \
   --env-file .env \
   --restart unless-stopped \
-  czgs-dashboard
+  czgs-dashboard:local
 ```
