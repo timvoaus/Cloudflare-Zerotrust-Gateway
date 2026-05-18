@@ -1,8 +1,12 @@
 # Cloudflare Zero Trust Gateway Scripts Dashboard
 
-Cloudflare Zero Trust Gateway Scripts (CZGS) helps you build and maintain Cloudflare Gateway DNS filter lists from public blocklists and allowlists. It includes a web dashboard, a terminal menu, Docker deployment files, and direct Node.js scripts for users who prefer the command line.
+Cloudflare Zero Trust Gateway Scripts (CZGS) helps you build, maintain, and manage Cloudflare Gateway DNS filter lists from public blocklists and allowlists. The project includes a web dashboard, a terminal menu, Docker deployment files, and direct Node.js scripts for automation-focused workflows.
 
-The dashboard can download configured lists, normalize domains, sync Cloudflare Gateway lists, create or update Gateway firewall rules, manage list source URLs, and manage a custom allowlist.
+The dashboard can download configured lists, normalize domains, sync Cloudflare Gateway lists, create or update Gateway firewall rules, manage list source URLs, manage a custom allowlist, and review DNS traffic-map data.
+
+## Project Foundation
+
+This project builds on the backend foundation provided by [`mrrfv/cloudflare-gateway-pihole-scripts`](https://github.com/mrrfv/cloudflare-gateway-pihole-scripts). The backend has been adapted and extended to support this project's configuration model, dashboard workflow, Cloudflare Zero Trust Gateway automation, Docker deployment approach, and tailored management features.
 
 ## Features
 
@@ -11,6 +15,7 @@ The dashboard can download configured lists, normalize domains, sync Cloudflare 
 - Cloudflare API credential setup through `.env` or environment variables
 - Blocklist and allowlist URL management
 - Custom allowlist management with an allow rule
+- Traffic-map history using Cloudflare analytics and local SQLite snapshots
 - Docker and Docker Compose support
 - Direct CLI scripts for automation and advanced use
 
@@ -32,7 +37,7 @@ Recommended patterns:
 2. Docker on a remote host:
    Set both `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD`, then avoid exposing port `3333` directly unless you also trust the network path.
 3. Cloudflare Tunnel or reverse proxy:
-   Keep `DASHBOARD_PASSWORD` enabled unless Cloudflare Access or- **Manage DNS Rewrites**: Create, update, and **delete** DNS override rules directly from the dashboard.
+   Keep `DASHBOARD_PASSWORD` enabled unless Cloudflare Access, a VPN, or another trusted access layer already protects the dashboard.
 4. Fully private network:
    `DASHBOARD_AUTH_DISABLED=1` is reasonable only if the service is unreachable from untrusted clients.
 
@@ -55,7 +60,6 @@ DASHBOARD_PASSWORD=choose_a_long_random_password
 # Leave this at 0 unless another trusted access layer protects the app
 DASHBOARD_AUTH_DISABLED=0
 ```
-
 
 ## Requirements
 
@@ -140,23 +144,21 @@ cp .env.default .env
 # Edit .env and set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID
 ```
 
-
-
 For remote local-development access, set `DASHBOARD_PASSWORD` in `.env`.
 
 ## Dashboard Workflow
 
 Before starting the dashboard, ensure you have configured your Cloudflare credentials in your `.env` file or as environment variables.
 
-1.  **Launch the Dashboard**: Open `http://localhost:3333` in your browser.
-2.  **Manage Sources**: Under **Manage URLs**, you can customize which public blocklists and allowlists the script should pull from.
-3.  **Execute Update**: Return to the **Quick Update** tab and click **Run Update**. This will:
-    - Download and merge all remote lists.
-    - Normalize domains and remove duplicates.
-    - Sync the results to Cloudflare Gateway lists (chunked into groups of 1,000).
-    - Create/update the Gateway DNS firewall rule.
-4.  **Custom Allowlist**: Use the **Custom Allowlist** tab to manage specific domains that should always be accessible, regardless of what's in the blocklists.
-5.  **Verify Rule Order**: Log in to your [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) and navigate to **Gateway > Firewall Policies > DNS**. Ensure that the `Gateway Custom Allow Rule` is positioned **ABOVE** the `CZGS Filter Lists` rule. Rules are evaluated from top to bottom.
+1. **Launch the Dashboard**: Open `http://localhost:3333` in your browser.
+2. **Manage Sources**: Under **Manage URLs**, you can customize which public blocklists and allowlists the script should pull from.
+3. **Execute Update**: Return to the **Quick Update** tab and click **Run Update**. This will:
+   - Download and merge all remote lists.
+   - Normalize domains and remove duplicates.
+   - Sync the results to Cloudflare Gateway lists, chunked into groups of 1,000.
+   - Create or update the Gateway DNS firewall rule.
+4. **Custom Allowlist**: Use the **Custom Allowlist** tab to manage specific domains that should always be accessible, regardless of what is in the blocklists.
+5. **Verify Rule Order**: Log in to your [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) and navigate to **Gateway > Firewall Policies > DNS**. Ensure that the `Gateway Custom Allow Rule` is positioned **above** the `CZGS Filter Lists` rule. Rules are evaluated from top to bottom.
 
 Full Reset deletes only generated CZGS block resources: lists named `CZGS List...` and rules named `CZGS Filter Lists...`. It preserves the custom allowlist and custom allow rule.
 
