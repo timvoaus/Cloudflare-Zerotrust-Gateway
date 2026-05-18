@@ -93,6 +93,48 @@ body::after {
   z-index: -2;
 }
 
+/* Quick Update Progress Indicator */
+.update-progress {
+  background: var(--mica-bg-soft);
+  border: 1px solid var(--mica-border);
+  border-radius: var(--radius-card);
+  padding: 16px 20px;
+  margin-bottom: 20px;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.progress-phase {
+  color: var(--text-main);
+  font-weight: 500;
+}
+
+.progress-fraction {
+  color: var(--text-soft);
+  font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+}
+
+.progress-bar-container {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hot) 100%);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
 button,
 input,
 textarea {
@@ -749,6 +791,7 @@ textarea:focus {
 
 .btn-primary,
 .btn-danger,
+.btn-defragment,
 .btn-icon {
   min-height: 40px;
   display: inline-flex;
@@ -809,12 +852,30 @@ textarea:focus {
   box-shadow: 0 18px 34px rgba(255, 111, 112, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
-.sidebar-footer .btn-danger {
+.btn-defragment {
+  padding: 10px 16px;
+  color: #94c4ff;
+  background: rgba(100, 149, 237, 0.08);
+  border: 1px solid rgba(100, 149, 237, 0.28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.btn-defragment:hover {
+  color: #fff;
+  background: linear-gradient(135deg, #6da3f7, #4a7de4);
+  border-color: rgba(255, 255, 255, 0.24);
+  transform: translateY(-2px);
+  box-shadow: 0 18px 34px rgba(100, 149, 237, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+.sidebar-footer .btn-danger,
+.sidebar-footer .btn-defragment {
   width: 100%;
 }
 
 .btn-primary:disabled,
-.btn-danger:disabled {
+.btn-danger:disabled,
+.btn-defragment:disabled {
   opacity: 0.46;
   cursor: not-allowed;
   transform: none;

@@ -3,8 +3,65 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { spawn } from 'node:child_process';
-import { timingSafeEqual } from 'node:crypto';
+import { spawn } from "node:child_process";
+
+// Regex to parse CZGS_PROGRESS lines from child process output
+const PROGRESS_REGEX = /^CZGS_PROGRESS\|(.+)$/;
+import { initDNSAnalytics, syncDNSAnalyticsToDatabase, buildDNSAnalyticsDataFromCache, fetchDNSTimeSeriesData, fetchTopDomains, fetchTopLocations, fetchResolverDecisions } from './lib/server/dns-analytics.js';
+import { initTrafficMap, syncTrafficMapAggregatesToDatabase, isTrafficMapGraphQLSyncFresh, buildTrafficMapData, emitTrafficMapData, TRAFFIC_MAP_HOURS, TRAFFIC_MAP_ACTIVITY_LIMIT, TRAFFIC_MAP_MAX_ACTIVITY_PAGES, TRAFFIC_MAP_ACTIVITY_FIELDS, TRAFFIC_MAP_COUNTRY_CENTROIDS } from './lib/server/traffic-map.js';
+import {
+  DASHBOARD_USERNAME,
+  DASHBOARD_PASSWORD,
+  DASHBOARD_AUTH_DISABLED,
+  DASHBOARD_ALLOWED_ORIGINS,
+  isDashboardRequestAuthorized,
+  requireDashboardAccess,
+  createSocketAuthOptions,
+  logDashboardSecurityWarning,
+} from './lib/server/dashboard-auth.js';
+import {
+  CUSTOM_ALLOWLIST_NAME,
+  CUSTOM_ALLOW_RULE_NAME,
+  CUSTOM_DENYLIST_NAME,
+  CUSTOM_DENY_RULE_NAME,
+  GENERATED_LIST_NAME_PREFIX,
+  GENERATED_RULE_NAME_PREFIX,
+  RULE_ORDER_WARNING,
+  isGeneratedListName,
+  isGeneratedRuleName,
+  isCustomAllowlistName,
+  isCustomDenylistName,
+  isCustomAllowRuleName,
+  isCustomDenyRuleName,
+  findCustomAllowlist,
+  findCustomDenylist,
+  upsertAllowRule,
+  upsertDenyRule,
+  findOrCreateAllowlist,
+  findOrCreateDenylist,
+} from './lib/server/custom-gateway.js';
+import {
+  DNS_REWRITE_RULE_PREFIX,
+  DNS_REWRITE_RULE_DESCRIPTION,
+  isDnsRewriteRuleName,
+  normalizeRewriteDomain,
+  escapeWirefilterString,
+  isValidRewriteDomain,
+  parseRewriteLines,
+  getRewriteDomainFromRule,
+  getRewriteIpsFromRule,
+  upsertDnsRewriteRule,
+  serializeDnsRewriteRule,
+} from './lib/server/dns-rewrite.js';
+import {
+  GATEWAY_LOCATION_ID,
+  detectGatewayLocationId,
+  getPrimaryIpv4Network,
+  getDnsEndpointValue,
+  pickEndpointFields,
+  buildGatewayLocationUpdatePayload,
+  serializeGatewayLocationIpv4,
+} from './lib/server/gateway-location.js';
 import { isIP } from 'node:net';
 import { fileURLToPath } from 'url';
 import geoip from 'geoip-lite';
@@ -21,19 +78,73 @@ import {
   getZeroTrustRules,
   deleteZeroTrustListsOneByOne,
   deleteZeroTrustRule,
+  getZeroTrustListItemValues,
+  patchExistingListChunked,
+  defragmentZeroTrustLists,
+  upsertZeroTrustDNSRule,
+  upsertZeroTrustSNIRule,
 } from './lib/api.js';
 import { requestGateway } from './lib/helpers.js';
 import { 
   ACCOUNT_ID,
   API_TOKEN,
   RECOMMENDED_ALLOWLIST_URLS, 
-  RECOMMENDED_BLOCKLIST_URLS 
+  RECOMMENDED_BLOCKLIST_URLS,
+  GATEWAY_PATCH_CHUNK_SIZE,
+  BLOCK_BASED_ON_SNI,
+  CZGS_AUTO_DEFRAGMENT,
 } from './lib/constants.js';
 
 const DATA_DIR = join(__dirname, 'data');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR);
 
 const db = new DatabaseSync(join(DATA_DIR, 'traffic_logs.db'));
+
+// Cache for auto-detected Gateway Location ID
+let detectedGatewayLocationId = null;
+
+/**
+ * Get the Gateway Location ID (from env or auto-detect).
+ * @param {Socket|null} socket - Optional socket for logging
+ * @returns {Promise<string|null>} - Location ID or null
+ */
+async function getGatewayLocationId(socket = null) {
+  // Use explicitly set env var if available
+  if (GATEWAY_LOCATION_ID) {
+    return GATEWAY_LOCATION_ID;
+  }
+
+  // Return cached detected ID if available
+  if (detectedGatewayLocationId) {
+    return detectedGatewayLocationId;
+  }
+
+  // Auto-detect from API
+  if (socket) {
+    socket.emit('log', '\x1b[36mAuto-detecting Gateway Location ID...\x1b[0m\n');
+  }
+
+  const detected = await detectGatewayLocationId(ACCOUNT_ID, API_TOKEN);
+
+  if (detected) {
+    detectedGatewayLocationId = detected;
+    if (socket) {
+      socket.emit('log', `\x1b[32mAuto-detected Gateway Location: ${detected}\x1b[0m\n`);
+    }
+    return detected;
+  }
+
+  if (socket) {
+    socket.emit('log', '\x1b[31mFailed to auto-detect Gateway Location ID.\x1b[0m\n');
+    socket.emit('log', '\x1b[33mSet CLOUDFLARE_GATEWAY_LOCATION_ID in your .env file.\x1b[0m\n');
+  }
+  return null;
+}
+
+// Initialize modules with database and credentials
+initDNSAnalytics({ database: db, accountId: ACCOUNT_ID, apiToken: API_TOKEN });
+initTrafficMap({ database: db, accountId: ACCOUNT_ID, apiToken: API_TOKEN });
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS logs (
     query_id TEXT PRIMARY KEY,
@@ -128,86 +239,45 @@ db.exec(`
 const app = express();
 const httpServer = createServer(app);
 
-const DASHBOARD_USERNAME = process.env.DASHBOARD_USERNAME || "admin";
-const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || process.env.CZGS_DASHBOARD_PASSWORD || "";
-const DASHBOARD_AUTH_DISABLED = process.env.DASHBOARD_AUTH_DISABLED === "1";
-const DASHBOARD_ALLOWED_ORIGINS = (process.env.DASHBOARD_ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
-function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function parseBasicAuth(req) {
-  const header = req.headers.authorization || "";
-  if (!header.startsWith("Basic ")) return null;
-
-  try {
-    const decoded = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
-    const separatorIndex = decoded.indexOf(":");
-    if (separatorIndex === -1) return null;
-
-    return {
-      username: decoded.slice(0, separatorIndex),
-      password: decoded.slice(separatorIndex + 1),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function isLoopbackRequest(req) {
-  const remoteAddress = req.socket?.remoteAddress || "";
-  return remoteAddress === "::1" || remoteAddress === "127.0.0.1" || remoteAddress === "::ffff:127.0.0.1";
-}
-
-function isDashboardRequestAuthorized(req) {
-  if (DASHBOARD_AUTH_DISABLED) return true;
-
-  if (!DASHBOARD_PASSWORD) {
-    return isLoopbackRequest(req);
-  }
-
-  const credentials = parseBasicAuth(req);
-  return !!credentials &&
-    safeEqual(credentials.username, DASHBOARD_USERNAME) &&
-    safeEqual(credentials.password, DASHBOARD_PASSWORD);
-}
-
-function requireDashboardAccess(req, res, next) {
-  if (isDashboardRequestAuthorized(req)) return next();
-
-  if (DASHBOARD_PASSWORD) {
-    res.set("WWW-Authenticate", 'Basic realm="CZGS Dashboard", charset="UTF-8"');
-    return res.status(401).send("Authentication required.");
-  }
-
-  return res.status(403).send(
-    "Remote dashboard access is blocked by default. Set DASHBOARD_PASSWORD to enable authenticated remote access."
-  );
-}
-
-const socketOptions = {
-  allowRequest: (req, callback) => {
-    if (isDashboardRequestAuthorized(req)) return callback(null, true);
-    return callback("Unauthorized dashboard request", false);
-  },
-};
-
-if (DASHBOARD_ALLOWED_ORIGINS.length > 0) {
-  socketOptions.cors = {
-    origin: DASHBOARD_ALLOWED_ORIGINS,
-    methods: ["GET", "POST"],
-    credentials: true,
-  };
-}
+// Dashboard auth options from module
+const socketOptions = createSocketAuthOptions(DASHBOARD_ALLOWED_ORIGINS);
 
 const io = new Server(httpServer, socketOptions);
 const socketViewState = new Map();
+
+// Health check endpoint - must be before auth middleware
+// Get version from package.json
+let appVersion = 'unknown';
+try {
+  const packageJson = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'));
+  appVersion = packageJson.version || 'unknown';
+} catch {
+  // Version stays as 'unknown' if file can't be read
+}
+
+const startTime = Date.now();
+
+app.get('/api/health', (req, res) => {
+  // Check database writability
+  let databaseWritable = false;
+  try {
+    // Try a simple write operation to verify DB is accessible
+    db.exec('CREATE TABLE IF NOT EXISTS _health_check (id INTEGER PRIMARY KEY)');
+    databaseWritable = true;
+  } catch {
+    databaseWritable = false;
+  }
+
+  const health = {
+    ok: true,
+    cloudflareConfigured: !!(API_TOKEN && ACCOUNT_ID),
+    databaseWritable,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    version: appVersion,
+  };
+
+  res.status(200).json(health);
+});
 
 app.use(requireDashboardAccess);
 app.use(express.static(join(__dirname, 'public')));
@@ -219,121 +289,6 @@ app.use(express.json());
 
 // Settings endpoint removed. Configure via .env or environment variables.
 
-const CUSTOM_ALLOWLIST_NAME = "Gateway Custom Allowlist";
-const CUSTOM_ALLOW_RULE_NAME = "Gateway Custom Allow Rule";
-const CUSTOM_DENYLIST_NAME = "Gateway Custom Denylist";
-const CUSTOM_DENY_RULE_NAME = "Gateway Custom Deny Rule";
-const DNS_REWRITE_RULE_PREFIX = "Gateway DNS Rewrite - ";
-const DNS_REWRITE_RULE_DESCRIPTION = "DNS rewrite managed by the dashboard. Avoid editing this rule name.";
-const GATEWAY_LOCATION_ID = process.env.CLOUDFLARE_GATEWAY_LOCATION_ID || "97434c6e90c046e9b6def9da8cb08a40";
-const GENERATED_LIST_NAME_PREFIX = "CZGS List";
-const GENERATED_RULE_NAME_PREFIX = "CZGS Filter Lists";
-const RULE_ORDER_WARNING = `IMPORTANT: In Cloudflare Zero Trust > Gateway > Firewall Policies > DNS, move "${CUSTOM_ALLOW_RULE_NAME}" above "${GENERATED_RULE_NAME_PREFIX}". Rules are evaluated top-to-bottom, so the custom allow rule must be first.`;
-
-function isGeneratedListName(name) {
-  return name.startsWith(GENERATED_LIST_NAME_PREFIX);
-}
-
-function isGeneratedRuleName(name) {
-  return name.startsWith(GENERATED_RULE_NAME_PREFIX);
-}
-
-function isDnsRewriteRuleName(name) {
-  return name.startsWith(DNS_REWRITE_RULE_PREFIX);
-}
-
-function isCustomAllowlistName(name) {
-  return name === CUSTOM_ALLOWLIST_NAME || (name.endsWith("Custom Allowlist") && !name.startsWith("CZGS"));
-}
-
-function isCustomDenylistName(name) {
-  return name === CUSTOM_DENYLIST_NAME || (name.endsWith("Custom Denylist") && !name.startsWith("CZGS"));
-}
-
-function isCustomAllowRuleName(name) {
-  return name === CUSTOM_ALLOW_RULE_NAME || (name.endsWith("Custom Allow Rule") && !name.startsWith("CZGS"));
-}
-
-function isCustomDenyRuleName(name) {
-  return name === CUSTOM_DENY_RULE_NAME || (name.endsWith("Custom Deny Rule") && !name.startsWith("CZGS"));
-}
-
-function findCustomAllowlist(lists = []) {
-  return lists.find(({ name }) => name === CUSTOM_ALLOWLIST_NAME)
-    || lists.find(({ name }) => isCustomAllowlistName(name) && !isGeneratedListName(name));
-}
-
-function findCustomDenylist(lists = []) {
-  return lists.find(({ name }) => name === CUSTOM_DENYLIST_NAME)
-    || lists.find(({ name }) => isCustomDenylistName(name) && !isGeneratedListName(name));
-}
-
-function normalizeRewriteDomain(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\.$/, "");
-}
-
-function escapeWirefilterString(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function isValidRewriteDomain(value) {
-  const DOMAIN_RE = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-  return DOMAIN_RE.test(value);
-}
-
-function parseRewriteLines(raw) {
-  const entries = [];
-  const invalid = [];
-  const lines = String(raw || "").split(/\r?\n/);
-
-  lines.forEach((line, index) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) return;
-
-    const normalizedLine = trimmed
-      .replace(/\s*->\s*/, " ")
-      .replace(/\s*=\s*/, " ")
-      .replace(/\s+/g, " ");
-    const [domainValue, ...ipValues] = normalizedLine.split(/[,\s]+/).filter(Boolean);
-    const domain = normalizeRewriteDomain(domainValue);
-    const ips = [...new Set(ipValues.map(ip => ip.trim()).filter(Boolean))];
-
-    if (!isValidRewriteDomain(domain)) {
-      invalid.push({ line: index + 1, value: trimmed, reason: "Invalid domain" });
-      return;
-    }
-
-    if (ips.length === 0 || ips.some(ip => isIP(ip) === 0)) {
-      invalid.push({ line: index + 1, value: trimmed, reason: "Invalid IP address" });
-      return;
-    }
-
-    entries.push({ domain, ips });
-  });
-
-  const byDomain = new Map();
-  for (const entry of entries) {
-    byDomain.set(entry.domain, entry);
-  }
-
-  return { entries: [...byDomain.values()], invalid };
-}
-
-function getRewriteDomainFromRule(rule) {
-  if (rule.name?.startsWith(DNS_REWRITE_RULE_PREFIX)) {
-    return normalizeRewriteDomain(rule.name.slice(DNS_REWRITE_RULE_PREFIX.length));
-  }
-
-  const match = String(rule.traffic || "").match(/dns\.fqdn\s*==\s*"((?:\\"|[^"])*)"/);
-  return match ? normalizeRewriteDomain(match[1].replace(/\\"/g, '"')) : "";
-}
-
-function getRewriteIpsFromRule(rule) {
-  return Array.isArray(rule.rule_settings?.override_ips) ? rule.rule_settings.override_ips : [];
-}
 
 // Helper to spawn and stream output
 function runScript(scriptArgs, socket) {
@@ -347,7 +302,52 @@ function runScript(scriptArgs, socket) {
       env: { ...inheritedEnv },
     });
 
-    child.stdout.on("data", (data) => socket.emit("log", data.toString()));
+    child.stdout.on("data", (data) => {
+      const lines = data.toString().split("\n");
+      
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        
+        // Check for progress line
+        const progressMatch = trimmed.match(PROGRESS_REGEX);
+        if (progressMatch) {
+          try {
+            // Parse key=value pairs (handle | as separator)
+            const params = new Map();
+            const pairs = progressMatch[1].split("|");
+            for (const pair of pairs) {
+              const [key, value] = pair.split("=");
+              if (key && value !== undefined) {
+                params.set(key, value);
+              }
+            }
+            
+            const phase = params.get("phase");
+            const current = parseInt(params.get("current"), 10);
+            const total = parseInt(params.get("total"), 10);
+            const message = params.get("message");
+            
+            if (phase && !isNaN(current) && !isNaN(total)) {
+              // Emit structured progress event to frontend
+              socket.emit("script_progress", {
+                phase,
+                current,
+                total,
+                message: message || `${phase} ${current}/${total}`,
+                timestamp: Date.now(),
+              });
+            }
+          } catch (err) {
+            // Ignore parse errors, fall through to regular log
+          }
+        }
+        
+        // Always emit to terminal (preserve existing behavior)
+        socket.emit("log", line + "\n");
+      }
+    });
+    
     child.stderr.on("data", (data) => socket.emit("log", `\x1b[31m${data.toString()}\x1b[0m`));
 
     child.on("error", (err) => {
@@ -412,8 +412,7 @@ function writeEnvUrls(key, urls) {
 const CUSTOM_LIST_DOMAIN_RE = /^([a-z0-9-]+\.)+[a-z]{2,}$/;
 
 async function fetchCustomListItems(listId) {
-  const { result } = await requestGateway(`/lists/${listId}/items?per_page=1000`, { method: "GET" });
-  return (result ?? []).map((item) => item.value);
+  return getZeroTrustListItemValues(listId);
 }
 
 async function prepareCustomListDomains({ action, listId, domains, socket }) {
@@ -489,604 +488,8 @@ async function prepareCustomListDomains({ action, listId, domains, socket }) {
   throw new Error(`Unsupported list action: ${action}`);
 }
 
-async function upsertAllowRule(listId) {
-  const allowExpression = `any(dns.domains[*] in $${listId})`;
-  const { result: existingRules } = await getZeroTrustRules();
-  const existingAllowRule = existingRules?.find(({ name }) => name === CUSTOM_ALLOW_RULE_NAME)
-    || existingRules?.find(({ name }) => isCustomAllowRuleName(name) && !isGeneratedRuleName(name));
 
-  const rulePayload = {
-    name: CUSTOM_ALLOW_RULE_NAME,
-    description: `Custom allow list managed by the dashboard. Must be ordered above ${GENERATED_RULE_NAME_PREFIX}.`,
-    enabled: true,
-    action: "allow",
-    filters: ["dns"],
-    traffic: allowExpression,
-  };
-
-  if (existingAllowRule) {
-    await requestGateway(`/rules/${existingAllowRule.id}`, {
-      method: "PUT",
-      body: JSON.stringify(rulePayload),
-    });
-    return "updated";
-  } else {
-    await requestGateway("/rules", {
-      method: "POST",
-      body: JSON.stringify(rulePayload),
-    });
-    return "created";
-  }
-}
-
-async function upsertDenyRule(listId) {
-  const denyExpression = `any(dns.domains[*] in $${listId})`;
-  const { result: existingRules } = await getZeroTrustRules();
-  const existingDenyRule = existingRules?.find(({ name }) => name === CUSTOM_DENY_RULE_NAME)
-    || existingRules?.find(({ name }) => isCustomDenyRuleName(name) && !isGeneratedRuleName(name));
-
-  const rulePayload = {
-    name: CUSTOM_DENY_RULE_NAME,
-    description: "Custom deny list managed by the dashboard.",
-    enabled: true,
-    action: "block",
-    filters: ["dns"],
-    traffic: denyExpression,
-  };
-
-  if (existingDenyRule) {
-    await requestGateway(`/rules/${existingDenyRule.id}`, {
-      method: "PUT",
-      body: JSON.stringify(rulePayload),
-    });
-    return "updated";
-  } else {
-    await requestGateway("/rules", {
-      method: "POST",
-      body: JSON.stringify(rulePayload),
-    });
-    return "created";
-  }
-}
-
-async function upsertDnsRewriteRule({ domain, ips }, existingRule) {
-  const rulePayload = {
-    name: `${DNS_REWRITE_RULE_PREFIX}${domain}`,
-    description: DNS_REWRITE_RULE_DESCRIPTION,
-    enabled: true,
-    action: "override",
-    filters: ["dns"],
-    traffic: `dns.fqdn == "${escapeWirefilterString(domain)}"`,
-    rule_settings: {
-      override_ips: ips,
-    },
-  };
-
-  if (existingRule) {
-    await requestGateway(`/rules/${existingRule.id}`, {
-      method: "PUT",
-      body: JSON.stringify(rulePayload),
-    });
-    return "updated";
-  }
-
-  await requestGateway("/rules", {
-    method: "POST",
-    body: JSON.stringify(rulePayload),
-  });
-  return "created";
-}
-
-function serializeDnsRewriteRule(rule) {
-  return {
-    id: rule.id,
-    name: rule.name,
-    domain: getRewriteDomainFromRule(rule),
-    ips: getRewriteIpsFromRule(rule),
-    enabled: rule.enabled !== false,
-  };
-}
-
-function getPrimaryIpv4Network(location) {
-  return Array.isArray(location?.networks) && location.networks.length > 0
-    ? location.networks[0]?.network || ""
-    : "";
-}
-
-function getDnsEndpointValue(enabled, value) {
-  return {
-    enabled: enabled !== false && Boolean(value),
-    value: value || "",
-  };
-}
-
-function pickEndpointFields(endpoint = {}, allowedFields = []) {
-  const picked = {};
-  for (const field of allowedFields) {
-    if (endpoint[field] !== undefined) picked[field] = endpoint[field];
-  }
-  return picked;
-}
-
-function buildGatewayLocationUpdatePayload(location, network) {
-  const endpoints = location.endpoints || {};
-  const payload = {
-    name: location.name,
-    networks: [{ network }],
-  };
-
-  if (location.client_default !== undefined) payload.client_default = location.client_default;
-  if (location.dns_destination_ips_id !== undefined) payload.dns_destination_ips_id = location.dns_destination_ips_id;
-  if (location.ecs_support !== undefined) payload.ecs_support = location.ecs_support;
-  if (location.dns_destination_ipv6_block_id) {
-    payload.dns_destination_ipv6_block_id = location.dns_destination_ipv6_block_id;
-  }
-
-  const sanitizedEndpoints = {};
-  if (endpoints.doh) sanitizedEndpoints.doh = pickEndpointFields(endpoints.doh, ["enabled", "networks", "require_token"]);
-  if (endpoints.dot) sanitizedEndpoints.dot = pickEndpointFields(endpoints.dot, ["enabled", "networks"]);
-  if (endpoints.ipv4) sanitizedEndpoints.ipv4 = pickEndpointFields(endpoints.ipv4, ["enabled"]);
-  if (endpoints.ipv6) sanitizedEndpoints.ipv6 = pickEndpointFields(endpoints.ipv6, ["enabled", "networks"]);
-  if (Object.keys(sanitizedEndpoints).length > 0) payload.endpoints = sanitizedEndpoints;
-
-  return payload;
-}
-
-function serializeGatewayLocationIpv4(location) {
-  const protectedNetwork = getPrimaryIpv4Network(location);
-  const ipv4Pair = [location.ipv4_destination, location.ipv4_destination_backup]
-    .filter(Boolean)
-    .join(" / ");
-  const gatewayHostname = location.doh_subdomain
-    ? `${location.doh_subdomain}.cloudflare-gateway.com`
-    : "";
-
-  return {
-    locationName: location.name || "Cloudflare location",
-    protectedNetwork,
-    network: protectedNetwork,
-    dnsEndpoints: {
-      ipv4: getDnsEndpointValue(location.endpoints?.ipv4?.enabled, ipv4Pair),
-      ipv6: getDnsEndpointValue(location.endpoints?.ipv6?.enabled, location.ip),
-      dot: getDnsEndpointValue(location.endpoints?.dot?.enabled, gatewayHostname),
-      doh: getDnsEndpointValue(location.endpoints?.doh?.enabled, gatewayHostname ? `https://${gatewayHostname}/dns-query` : ""),
-    },
-    updatedAt: location.updated_at || null,
-  };
-}
-
-// DNS Analytics Functions
-async function fetchDNSTimeSeriesData(hours = 24) {
-  const now = new Date();
-  const startTime = new Date(now - hours * 60 * 60 * 1000).toISOString();
-  const endTime = now.toISOString();
-
-  // Use sparkline with ts dimension for 15-minute interval data
-  const query = `
-    query GetDNSTimeSeries($accountTag: string!, $start: Time!, $end: Time!) {
-      viewer {
-        scope: accounts(filter: { accountTag: $accountTag }) {
-          sparkline: gatewayResolverQueriesAdaptiveGroups(
-            filter: {
-              datetime_geq: $start,
-              datetime_lt: $end
-            }
-            limit: 5000
-            orderBy: [datetimeFifteenMinutes_ASC]
-          ) {
-            count
-            dimensions {
-              ts: datetimeFifteenMinutes
-            }
-          }
-          total: gatewayResolverQueriesAdaptiveGroups(
-            filter: {
-              datetime_geq: $start,
-              datetime_lt: $end
-            }
-            limit: 1
-          ) {
-            count
-          }
-        }
-      }
-    }
-  `;
-
-  const variables = {
-    accountTag: ACCOUNT_ID,
-    start: startTime,
-    end: endTime,
-  };
-
-  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || data.errors) {
-    throw new Error(`GraphQL error: ${JSON.stringify(data.errors || data)}`);
-  }
-
-  const account = data.data?.viewer?.scope?.[0];
-  const sparklineData = account?.sparkline || [];
-  const totalResult = account?.total || [];
-
-  const totalCount = totalResult.reduce((sum, item) => sum + (item.count || 0), 0);
-
-  const intervalMs = 15 * 60 * 1000;
-  const dataMap = new Map();
-
-  sparklineData.forEach(item => {
-    const time = item.dimensions?.ts;
-    if (time) {
-      dataMap.set(new Date(time).getTime(), item.count || 0);
-    }
-  });
-
-  const startBucket = Math.ceil(new Date(startTime).getTime() / intervalMs) * intervalMs;
-  const endBucket = Math.floor(new Date(endTime).getTime() / intervalMs) * intervalMs;
-  const formattedData = [];
-
-  for (let timestamp = startBucket; timestamp <= endBucket; timestamp += intervalMs) {
-    const time = new Date(timestamp).toISOString();
-    formattedData.push({
-      time,
-      count: dataMap.has(timestamp) ? dataMap.get(timestamp) : null,
-    });
-  }
-
-  return { timeSeries: formattedData, totalCount, startTime, endTime };
-}
-
-function aggregateIntoTimeBuckets(data, intervalMinutes = 60) {
-  if (!data || data.length === 0) return [];
-
-  // Group data into time buckets
-  const buckets = new Map();
-
-  data.forEach(item => {
-    // Handle both datetimeHour and datetimeMinute dimensions
-    const timeStr = item.dimensions?.datetimeMinute || item.dimensions?.datetimeHour;
-    if (!timeStr) return;
-
-    const date = new Date(timeStr);
-    
-    if (intervalMinutes >= 60) {
-      // For hourly or larger intervals, just use the hour as-is
-      date.setMinutes(0, 0, 0);
-    } else {
-      // Round down to the nearest interval
-      const minutes = date.getMinutes();
-      const roundedMinutes = Math.floor(minutes / intervalMinutes) * intervalMinutes;
-      date.setMinutes(roundedMinutes, 0, 0);
-    }
-
-    const bucketKey = date.toISOString();
-    
-    if (!buckets.has(bucketKey)) {
-      buckets.set(bucketKey, { time: bucketKey, count: 0 });
-    }
-    
-    buckets.get(bucketKey).count += item.count || 0;
-  });
-
-  // Convert to array and sort by time
-  return Array.from(buckets.values()).sort((a, b) => new Date(a.time) - new Date(b.time));
-}
-
-async function fetchTopDomains(limit = 10) {
-  const now = new Date();
-  const startTime = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  const endTime = now.toISOString();
-
-  const query = `
-    query GetTopDomains($accountTag: string!, $start: Time!, $end: Time!, $limit: Int!) {
-      viewer {
-        scope: accounts(filter: { accountTag: $accountTag }) {
-          topDomains: gatewayResolverQueriesAdaptiveGroups(
-            filter: {
-              datetime_geq: $start,
-              datetime_lt: $end
-            }
-            limit: $limit
-            orderBy: [count_DESC]
-          ) {
-            count
-            dimensions {
-              queryName
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const variables = {
-    accountTag: ACCOUNT_ID,
-    start: startTime,
-    end: endTime,
-    limit: limit,
-  };
-
-  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || data.errors) {
-    throw new Error(`GraphQL error: ${JSON.stringify(data.errors || data)}`);
-  }
-
-  const account = data.data?.viewer?.scope?.[0];
-  const topDomains = account?.topDomains || [];
-
-  return topDomains
-    .map(item => ({
-      domain: item.dimensions?.queryName || 'N/A',
-      count: item.count || 0,
-    }))
-    .sort((a, b) => b.count - a.count);
-}
-
-async function fetchTopLocations(limit = 10) {
-  const now = new Date();
-  const startTime = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  const endTime = now.toISOString();
-
-  const query = `
-    query GetTopLocations($accountTag: string!, $start: Time!, $end: Time!, $limit: Int!) {
-      viewer {
-        accounts(filter: { accountTag: $accountTag }) {
-          topLocations: gatewayResolverQueriesAdaptiveGroups(
-            filter: {
-              datetime_geq: $start,
-              datetime_leq: $end
-            }
-            limit: $limit
-          ) {
-            count
-            dimensions {
-              locationName
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const variables = {
-    accountTag: ACCOUNT_ID,
-    start: startTime,
-    end: endTime,
-    limit: limit,
-  };
-
-  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || data.errors) {
-    throw new Error(`GraphQL error: ${JSON.stringify(data.errors || data)}`);
-  }
-
-  const account = data.data?.viewer?.accounts?.[0];
-  const topLocations = account?.topLocations || [];
-
-  return topLocations.map(item => ({
-    location: item.dimensions?.locationName || 'N/A',
-    count: item.count || 0,
-  }));
-}
-
-async function fetchResolverDecisions() {
-  const now = new Date();
-  const startTime = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  const endTime = now.toISOString();
-
-  const query = `
-    query GetResolverDecisions($accountTag: string!, $start: Time!, $end: Time!) {
-      viewer {
-        scope: accounts(filter: { accountTag: $accountTag }) {
-          data: gatewayResolverQueriesAdaptiveGroups(
-            filter: { datetime_geq: $start, datetime_lt: $end }
-            limit: 10
-            orderBy: [count_DESC]
-          ) {
-            count
-            dimensions {
-              metric: resolverDecision
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const variables = {
-    accountTag: ACCOUNT_ID,
-    start: startTime,
-    end: endTime,
-  };
-
-  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok || data.errors) {
-    throw new Error(`GraphQL error: ${JSON.stringify(data.errors || data)}`);
-  }
-
-  const RESOLVER_DECISION_LABELS = {
-    5: 'Allowed on no policy match',
-    9: 'Blocked rule',
-    10: 'Allowed rule',
-  };
-
-  const rows = data.data?.viewer?.scope?.[0]?.data || [];
-
-  return rows
-    .map(item => ({
-      metric: item.dimensions?.metric,
-      label: RESOLVER_DECISION_LABELS[item.dimensions?.metric] || `Decision ${item.dimensions?.metric}`,
-      count: item.count || 0,
-    }))
-    .sort((a, b) => b.count - a.count);
-}
-
-const TRAFFIC_MAP_COUNTRY_CENTROIDS = {
-  AD: [42.5462, 1.6016], AE: [23.4241, 53.8478], AF: [33.9391, 67.7100],
-  AG: [17.0608, -61.7964], AL: [41.1533, 20.1683], AM: [40.0691, 45.0382],
-  AO: [-11.2027, 17.8739], AR: [-38.4161, -63.6167], AT: [47.5162, 14.5501],
-  AU: [-25.2744, 133.7751], AZ: [40.1431, 47.5769], BA: [43.9159, 17.6791],
-  BB: [13.1939, -59.5432], BD: [23.6850, 90.3563], BE: [50.5039, 4.4699],
-  BF: [12.2383, -1.5616], BG: [42.7339, 25.4858], BH: [25.9304, 50.6378],
-  BI: [-3.3731, 29.9189], BJ: [9.3077, 2.3158], BN: [4.5353, 114.7277],
-  BO: [-16.2902, -63.5887], BR: [-14.2350, -51.9253], BS: [25.0343, -77.3963],
-  BT: [27.5142, 90.4336], BW: [-22.3285, 24.6849], BY: [53.7098, 27.9534],
-  BZ: [17.1899, -88.4976], CA: [56.1304, -106.3468], CD: [-4.0383, 21.7587],
-  CF: [6.6111, 20.9394], CG: [-0.2280, 15.8277], CH: [46.8182, 8.2275],
-  CI: [7.5400, -5.5471], CL: [-35.6751, -71.5430], CM: [7.3697, 12.3547],
-  CN: [35.8617, 104.1954], CO: [4.5709, -74.2973], CR: [9.7489, -83.7534],
-  CU: [21.5218, -77.7812], CV: [16.5388, -23.0418], CY: [35.1264, 33.4299],
-  CZ: [49.8175, 15.4730], DE: [51.1657, 10.4515], DJ: [11.8251, 42.5903],
-  DK: [56.2639, 9.5018], DM: [15.4150, -61.3710], DO: [18.7357, -70.1627],
-  DZ: [28.0339, 1.6596], EC: [-1.8312, -78.1834], EE: [58.5953, 25.0136],
-  EG: [26.8206, 30.8025], ER: [15.1794, 39.7823], ES: [40.4637, -3.7492],
-  ET: [9.1450, 40.4897], FI: [61.9241, 25.7482], FJ: [-16.5780, 179.4144],
-  FM: [7.4256, 150.5508], FR: [46.2276, 2.2137], GA: [-0.8037, 11.6094],
-  GB: [55.3781, -3.4360], GD: [12.1165, -61.6790], GE: [42.3154, 43.3569],
-  GH: [7.9465, -1.0232], GM: [13.4432, -15.3101], GN: [9.9456, -9.6966],
-  GQ: [1.6508, 10.2679], GR: [39.0742, 21.8243], GT: [15.7835, -90.2308],
-  GW: [11.8037, -15.1801], GY: [4.8604, -58.9302], HK: [22.3193, 114.1694],
-  HN: [15.2000, -86.2419], HR: [45.1000, 15.2000], HT: [18.9712, -72.2852],
-  HU: [47.1625, 19.5033], ID: [-0.7893, 113.9213], IE: [53.1424, -7.6921],
-  IL: [31.0461, 34.8516], IN: [20.5937, 78.9629], IQ: [33.2232, 43.6793],
-  IR: [32.4279, 53.6880], IS: [64.9631, -19.0208], IT: [41.8719, 12.5674],
-  JM: [18.1096, -77.2975], JO: [30.5852, 36.2384], JP: [36.2048, 138.2529],
-  KE: [-0.0236, 37.9062], KG: [41.2044, 74.7661], KH: [12.5657, 104.9910],
-  KI: [-3.3704, -168.7340], KM: [-11.6455, 43.3333], KN: [17.3578, -62.7830],
-  KP: [40.3399, 127.5101], KR: [35.9078, 127.7669], KW: [29.3117, 47.4818],
-  KZ: [48.0196, 66.9237], LA: [19.8563, 102.4955], LB: [33.8547, 35.8623],
-  LC: [13.9094, -60.9789], LI: [47.1660, 9.5554], LK: [7.8731, 80.7718],
-  LR: [6.4281, -9.4295], LS: [-29.6100, 28.2336], LT: [55.1694, 23.8813],
-  LU: [49.8153, 6.1296], LV: [56.8796, 24.6032], LY: [26.3351, 17.2283],
-  MA: [31.7917, -7.0926], MC: [43.7384, 7.4246], MD: [47.4116, 28.3699],
-  ME: [42.7087, 19.3744], MG: [-18.7669, 46.8691], MH: [7.1315, 171.1845],
-  MK: [41.6086, 21.7453], ML: [17.5707, -3.9962], MM: [21.9162, 95.9560],
-  MN: [46.8625, 103.8467], MO: [22.1987, 113.5439], MR: [21.0079, -10.9408],
-  MT: [35.9375, 14.3754], MU: [-20.3484, 57.5522], MV: [3.2028, 73.2207],
-  MW: [-13.2543, 34.3015], MX: [23.6345, -102.5528], MY: [4.2105, 101.9758],
-  MZ: [-18.6657, 35.5296], NA: [-22.9576, 18.4904], NE: [17.6078, 8.0817],
-  NG: [9.0820, 8.6753], NI: [12.8654, -85.2072], NL: [52.1326, 5.2913],
-  NO: [60.4720, 8.4689], NP: [28.3949, 84.1240], NR: [-0.5228, 166.9315],
-  NZ: [-40.9006, 174.8860], OM: [21.4735, 55.9754], PA: [8.5380, -80.7821],
-  PE: [-9.1900, -75.0152], PG: [-6.3149, 143.9555], PH: [12.8797, 121.7740],
-  PK: [30.3753, 69.3451], PL: [51.9194, 19.1451], PT: [39.3999, -8.2245],
-  PW: [7.5150, 134.5825], PY: [-23.4425, -58.4438], QA: [25.3548, 51.1839],
-  RO: [45.9432, 24.9668], RS: [44.0165, 21.0059], RU: [61.5240, 105.3188],
-  RW: [-1.9403, 29.8739], SA: [23.8859, 45.0792], SB: [-9.6457, 160.1562],
-  SC: [-4.6796, 55.4920], SD: [12.8628, 30.2176], SE: [60.1282, 18.6435],
-  SG: [1.3521, 103.8198], SI: [46.1512, 14.9955], SK: [48.6690, 19.6990],
-  SL: [8.4606, -11.7799], SM: [43.9424, 12.4578], SN: [14.4974, -14.4524],
-  SO: [5.1521, 46.1996], SR: [3.9193, -56.0278], SS: [6.8770, 31.3070],
-  ST: [0.1864, 6.6131], SV: [13.7942, -88.8965], SY: [34.8021, 38.9968],
-  SZ: [-26.5225, 31.4659], TD: [15.4542, 18.7322], TG: [8.6195, 0.8248],
-  TH: [15.8700, 100.9925], TJ: [38.8610, 71.2761], TL: [-8.8742, 125.7275],
-  TM: [38.9697, 59.5563], TN: [33.8869, 9.5375], TO: [-21.1789, -175.1982],
-  TR: [38.9637, 35.2433], TT: [10.6918, -61.2225], TV: [-7.1095, 177.6493],
-  TW: [23.6978, 120.9605], TZ: [-6.3690, 34.8888], UA: [48.3794, 31.1656],
-  UG: [1.3733, 32.2903], US: [37.0902, -95.7129], UY: [-32.5228, -55.7658],
-  UZ: [41.3775, 64.5853], VA: [41.9029, 12.4534], VC: [12.9843, -61.2872],
-  VE: [6.4238, -66.5897], VN: [16.0583, 108.2772], VU: [-15.3767, 166.9592],
-  WS: [-13.7590, -172.1046], XK: [42.6026, 20.9030], YE: [15.5527, 48.5164],
-  ZA: [-30.5595, 22.9375], ZM: [-13.1339, 27.8493], ZW: [-19.0154, 29.1549],
-  AI: [18.2206, -63.0686], AQ: [-82.8628, 135.0000], AS: [-14.2710, -170.1322],
-  AW: [12.5211, -69.9683], AX: [60.1785, 19.9156], BL: [17.9000, -62.8333],
-  BM: [32.3078, -64.7505], BQ: [12.1784, -68.2385], BV: [-54.4208, 3.3464],
-  CC: [-12.1642, 96.8710], CK: [-21.2367, -159.7777], CW: [12.1696, -68.9900],
-  CX: [-10.4475, 105.6904], EH: [24.2155, -12.8858], FK: [-51.7963, -59.5236],
-  FO: [61.8926, -6.9118], GF: [3.9339, -53.1258], GG: [49.4657, -2.5853],
-  GI: [36.1408, -5.3536], GL: [71.7069, -42.6043], GP: [16.9950, -62.0673],
-  GS: [-54.4296, -36.5879], GU: [13.4443, 144.7937], HM: [-53.0818, 73.5042],
-  IM: [54.2361, -4.5481], IO: [-6.3432, 71.8765], JE: [49.2144, -2.1313],
-  KY: [19.3133, -81.2546], MF: [18.0708, -63.0501], MP: [17.3308, 145.3846],
-  MQ: [14.6415, -61.0242], MS: [16.7425, -62.1874], NC: [-20.9043, 165.6180],
-  NF: [-29.0408, 167.9547], NU: [-19.0544, -169.8672], PF: [-17.6797, -149.4068],
-  PM: [46.9419, -56.2711], PN: [-24.7036, -127.4393], PR: [18.2208, -66.5901],
-  PS: [31.9522, 35.2332], RE: [-21.1151, 55.5364], SH: [-24.1437, -10.0307],
-  SJ: [77.5536, 23.6703], SX: [18.0425, -63.0548], TC: [21.6940, -71.7979],
-  TF: [-49.2804, 69.3486], TK: [-8.9676, -171.8559], UM: [19.2823, 166.6470],
-  VG: [18.4207, -64.6400], VI: [18.3358, -64.8963], WF: [-13.7687, -177.1561],
-  YT: [-12.8275, 45.1662], AC: [-7.9467, -14.3559], CP: [10.2833, -109.2167],
-  DG: [-7.3133, 72.4111], EA: [35.8894, -5.3213], IC: [28.2916, -16.6291],
-  TA: [-37.1052, -12.2777], UK: [55.3781, -3.4360], AN: [12.2261, -69.0600],
-  CS: [44.0165, 21.0059], YU: [44.0165, 21.0059], SU: [61.5240, 105.3188],
-  TP: [-8.8742, 125.7275], ZR: [-4.0383, 21.7587], BU: [21.9162, 95.9560],
-  EU: [50.0000, 10.0000], AP: [10.0000, 120.0000], T1: [-38.0000, -25.0000],
-  A1: [-40.0000, -20.0000], A2: [-42.0000, -15.0000], O1: [-44.0000, -10.0000],
-  XX: [-46.0000, -5.0000],
-};
-
-function readPositiveIntegerEnv(name, fallback) {
-  const value = Number.parseInt(process.env[name] || '', 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-const TRAFFIC_MAP_HOURS = readPositiveIntegerEnv('TRAFFIC_MAP_HOURS', 24);
-const TRAFFIC_MAP_GRAPHQL_HOURS = Math.min(TRAFFIC_MAP_HOURS, 24);
-const TRAFFIC_MAP_ROW_LIMIT = readPositiveIntegerEnv('TRAFFIC_MAP_ROW_LIMIT', 10000);
-const TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS = readPositiveIntegerEnv('TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS', 300);
-const TRAFFIC_MAP_ACTIVITY_LIMIT = readPositiveIntegerEnv('TRAFFIC_MAP_ACTIVITY_LIMIT', 5000);
-const TRAFFIC_MAP_MAX_ACTIVITY_PAGES = readPositiveIntegerEnv('TRAFFIC_MAP_MAX_ACTIVITY_PAGES', 20);
-const TRAFFIC_MAP_ACTIVITY_FIELDS = [
-  'blocked',
-  'datetime',
-  'decision',
-  'initial_resolved_ips',
-  'query',
-  'query_id',
-  'resolved_ips',
-  'source_ip',
-  'src_country_code',
-];
-
-function normalizeCountryCode(value) {
-  return String(value || '').trim().toUpperCase();
-}
-
-function getResolvedIpCandidates(log) {
-  return [
-    ...(Array.isArray(log.resolved_ips) ? log.resolved_ips : []),
-    ...(Array.isArray(log.initial_resolved_ips) ? log.initial_resolved_ips : []),
-  ].filter(ip => isIP(ip) !== 0);
-}
+// Traffic Map module imported from lib/server/traffic-map.js
 
 function countryPoint(country, geo = null) {
   if (geo?.ll?.length === 2) {
@@ -1119,267 +522,7 @@ async function fetchGatewayActivityPage(paramsBase, page) {
   if (!response.ok || data.success === false) {
     throw new Error(`Gateway activities error: ${JSON.stringify(data.errors || data)}`);
   }
-
   return Array.isArray(data.result?.logs) ? data.result.logs : [];
-}
-
-const TRAFFIC_MAP_GRAPHQL_QUERY = `
-query TrafficMap($acct: string!, $start: Time!, $end: Time!, $rowLimit: Int!) {
-  viewer {
-    accounts(filter: { accountTag: $acct }) {
-      total: gatewayResolverQueriesAdaptiveGroups(
-        filter: { datetime_geq: $start, datetime_leq: $end }
-        limit: 1
-      ) { count }
-      sources: gatewayResolverQueriesAdaptiveGroups(
-        filter: { datetime_geq: $start, datetime_leq: $end }
-        limit: $rowLimit
-        orderBy: [count_DESC]
-      ) { count dimensions { srcIpCountry } }
-      destinations: gatewayResolverQueriesAdaptiveGroups(
-        filter: { datetime_geq: $start, datetime_leq: $end }
-        limit: $rowLimit
-        orderBy: [count_DESC]
-      ) { count dimensions { resolvedIpCountries } }
-      routes: gatewayResolverQueriesAdaptiveGroups(
-        filter: { datetime_geq: $start, datetime_leq: $end }
-        limit: $rowLimit
-        orderBy: [count_DESC]
-      ) { count dimensions { srcIpCountry resolvedIpCountries } }
-    }
-  }
-}`;
-
-function uniqueTrafficMapCountries(list) {
-  if (!Array.isArray(list)) return [];
-  const seen = new Set();
-  for (const value of list) {
-    const country = normalizeCountryCode(value);
-    if (country) seen.add(country);
-  }
-  return [...seen];
-}
-
-async function fetchTrafficMapGraphQLAggregate() {
-  if (!ACCOUNT_ID || !API_TOKEN) {
-    throw new Error('Traffic map GraphQL sync skipped: missing ACCOUNT_ID or API_TOKEN');
-  }
-
-  const end = new Date();
-  const start = new Date(end.getTime() - TRAFFIC_MAP_GRAPHQL_HOURS * 60 * 60 * 1000);
-  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({
-      query: TRAFFIC_MAP_GRAPHQL_QUERY,
-      variables: {
-        acct: ACCOUNT_ID,
-        start: start.toISOString(),
-        end: end.toISOString(),
-        rowLimit: TRAFFIC_MAP_ROW_LIMIT,
-      },
-    }),
-  });
-  const data = await response.json();
-
-  if (!response.ok || data.errors) {
-    throw new Error(`Traffic map GraphQL error: ${JSON.stringify(data.errors || data)}`);
-  }
-
-  const account = data.data?.viewer?.accounts?.[0];
-  if (!account) throw new Error('Traffic map GraphQL error: no account node returned');
-
-  return {
-    totalQueries: account.total?.[0]?.count || 0,
-    rawSources: account.sources || [],
-    rawDestinations: account.destinations || [],
-    rawRoutes: account.routes || [],
-    windowStart: start.toISOString(),
-    windowEnd: end.toISOString(),
-  };
-}
-
-function aggregateTrafficMapGraphQLRows(raw) {
-  const sources = new Map();
-  const destinations = new Map();
-  const routes = new Map();
-  const unmapped = new Map();
-  const noteUnmapped = country => {
-    if (country) unmapped.set(country, (unmapped.get(country) || 0) + 1);
-  };
-
-  for (const row of raw.rawSources) {
-    const country = normalizeCountryCode(row.dimensions?.srcIpCountry);
-    if (!country) continue;
-    const point = countryPoint(country);
-    if (point.lat == null || point.lng == null) {
-      noteUnmapped(country);
-      continue;
-    }
-    sources.set(country, (sources.get(country) || 0) + (row.count || 0));
-  }
-
-  for (const row of raw.rawDestinations) {
-    const countries = uniqueTrafficMapCountries(row.dimensions?.resolvedIpCountries);
-    for (const country of countries) {
-      const point = countryPoint(country);
-      if (point.lat == null || point.lng == null) {
-        noteUnmapped(country);
-        continue;
-      }
-      destinations.set(country, (destinations.get(country) || 0) + (row.count || 0));
-    }
-  }
-
-  for (const row of raw.rawRoutes) {
-    const sourceCountry = normalizeCountryCode(row.dimensions?.srcIpCountry);
-    const destinationCountries = uniqueTrafficMapCountries(row.dimensions?.resolvedIpCountries);
-    if (!sourceCountry || destinationCountries.length === 0) continue;
-    const sourcePoint = countryPoint(sourceCountry);
-    if (sourcePoint.lat == null || sourcePoint.lng == null) {
-      noteUnmapped(sourceCountry);
-      continue;
-    }
-
-    for (const destinationCountry of destinationCountries) {
-      if (destinationCountry === sourceCountry) continue;
-      const destinationPoint = countryPoint(destinationCountry);
-      if (destinationPoint.lat == null || destinationPoint.lng == null) {
-        noteUnmapped(destinationCountry);
-        continue;
-      }
-      const key = `${sourceCountry}->${destinationCountry}`;
-      const current = routes.get(key);
-      if (current) {
-        current.count += row.count || 0;
-      } else {
-        routes.set(key, {
-          sourceCountry,
-          sourceLat: sourcePoint.lat,
-          sourceLng: sourcePoint.lng,
-          destinationCountry,
-          destinationLat: destinationPoint.lat,
-          destinationLng: destinationPoint.lng,
-          count: row.count || 0,
-        });
-      }
-    }
-  }
-
-  return {
-    sources: [...sources.entries()].map(([country, count]) => {
-      const point = countryPoint(country);
-      return { country, lat: point.lat, lng: point.lng, count };
-    }).sort((a, b) => b.count - a.count),
-    destinations: [...destinations.entries()].map(([country, count]) => {
-      const point = countryPoint(country);
-      return { country, lat: point.lat, lng: point.lng, count };
-    }).sort((a, b) => b.count - a.count),
-    routes: [...routes.values()].sort((a, b) => b.count - a.count),
-    unmappedCountries: [...unmapped.entries()].sort((a, b) => b[1] - a[1]).map(([country, hits]) => ({ country, hits })),
-  };
-}
-
-function writeTrafficMapAggregate(agg, summary) {
-  db.exec('BEGIN TRANSACTION');
-  try {
-    db.exec('DELETE FROM traffic_map_sources; DELETE FROM traffic_map_destinations; DELETE FROM traffic_map_routes;');
-    const insertSource = db.prepare('INSERT INTO traffic_map_sources (country, lat, lng, count) VALUES (?, ?, ?, ?)');
-    const insertDestination = db.prepare('INSERT INTO traffic_map_destinations (country, lat, lng, count) VALUES (?, ?, ?, ?)');
-    const insertRoute = db.prepare(`
-      INSERT INTO traffic_map_routes
-        (source_country, destination_country, source_lat, source_lng, destination_lat, destination_lng, count)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const source of agg.sources) insertSource.run(source.country, source.lat, source.lng, source.count);
-    for (const destination of agg.destinations) insertDestination.run(destination.country, destination.lat, destination.lng, destination.count);
-    for (const route of agg.routes) {
-      insertRoute.run(
-        route.sourceCountry,
-        route.destinationCountry,
-        route.sourceLat,
-        route.sourceLng,
-        route.destinationLat,
-        route.destinationLng,
-        route.count
-      );
-    }
-    db.prepare(`
-      INSERT INTO traffic_map_meta (key, value) VALUES ('last_refresh', ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(JSON.stringify(summary));
-    db.prepare(`
-      INSERT INTO sync_state (key, last_synced_ts, oldest_synced_ts)
-      VALUES ('traffic_map_graphql', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET last_synced_ts = excluded.last_synced_ts, oldest_synced_ts = excluded.oldest_synced_ts
-    `).run(Math.floor(Date.now() / 1000), Math.floor(new Date(summary.window.from).getTime() / 1000));
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-}
-
-function upsertTrafficMapDailySnapshot(agg, totalQueries) {
-  const nowSec = Math.floor(Date.now() / 1000);
-  const day = new Date().toISOString().slice(0, 10);
-  const payload = JSON.stringify({
-    sources: agg.sources,
-    destinations: agg.destinations,
-    routes: agg.routes,
-  });
-  db.prepare(`
-    INSERT INTO traffic_map_daily_snapshots
-      (day, total_queries, source_count, destination_count, route_count, payload, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(day) DO UPDATE SET
-      total_queries = excluded.total_queries,
-      source_count = excluded.source_count,
-      destination_count = excluded.destination_count,
-      route_count = excluded.route_count,
-      payload = excluded.payload,
-      updated_at = excluded.updated_at
-  `).run(day, totalQueries, agg.sources.length, agg.destinations.length, agg.routes.length, payload, nowSec);
-  db.prepare("DELETE FROM traffic_map_daily_snapshots WHERE day < date('now', '-30 days')").run();
-}
-
-let isTrafficMapGraphQLSyncing = false;
-function isTrafficMapGraphQLSyncFresh() {
-  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('traffic_map_graphql');
-  if (!syncState?.last_synced_ts) return false;
-  const ageSeconds = Math.floor(Date.now() / 1000) - syncState.last_synced_ts;
-  return ageSeconds >= 0 && ageSeconds < TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS;
-}
-
-async function syncTrafficMapAggregatesToDatabase() {
-  if (isTrafficMapGraphQLSyncing) return;
-  isTrafficMapGraphQLSyncing = true;
-  try {
-    const start = Date.now();
-    const raw = await fetchTrafficMapGraphQLAggregate();
-    const aggregate = aggregateTrafficMapGraphQLRows(raw);
-    const summary = {
-      totalQueries: raw.totalQueries,
-      sources: aggregate.sources.length,
-      destinations: aggregate.destinations.length,
-      routes: aggregate.routes.length,
-      unmappedCountries: aggregate.unmappedCountries,
-      window: { from: raw.windowStart, to: raw.windowEnd },
-      durationMs: Date.now() - start,
-      updatedAt: new Date().toISOString(),
-    };
-    writeTrafficMapAggregate(aggregate, summary);
-    upsertTrafficMapDailySnapshot(aggregate, raw.totalQueries);
-    console.log(`Traffic map GraphQL sync complete. Total queries: ${raw.totalQueries}, sources: ${aggregate.sources.length}, destinations: ${aggregate.destinations.length}, routes: ${aggregate.routes.length}`);
-  } catch (err) {
-    console.error('Traffic map GraphQL sync failed:', err);
-    throw err;
-  } finally {
-    isTrafficMapGraphQLSyncing = false;
-  }
 }
 
 let isSyncing = false;
@@ -1476,224 +619,6 @@ async function syncTrafficLogsToDatabase(forceFull = false) {
   }
 }
 
-// DNS Analytics Sync Functions
-const DNS_ANALYTICS_RETENTION_DAYS = readPositiveIntegerEnv('DNS_ANALYTICS_RETENTION_DAYS', 30);
-
-function get15MinBucketTs(timestampMs) {
-  return Math.floor(timestampMs / (15 * 60 * 1000)) * (15 * 60);
-}
-
-async function syncDNSAnalyticsToDatabase(forceFull = false) {
-  if (!ACCOUNT_ID || !API_TOKEN) {
-    console.log('DNS analytics sync skipped: missing credentials');
-    return;
-  }
-  
-  const nowMs = Date.now();
-  const nowSec = Math.floor(nowMs / 1000);
-  
-  // Determine sync window
-  let fromSec = nowSec - 24 * 60 * 60; // Default: last 24 hours
-  
-  if (!forceFull) {
-    const stmt = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?');
-    const row = stmt.get('dns_analytics');
-    if (row?.last_synced_ts) {
-      // Start from last sync, but go back 1 hour for overlap/safety
-      fromSec = Math.max(row.last_synced_ts - 60 * 60, nowSec - 24 * 60 * 60);
-    }
-  }
-  
-  const startTime = new Date(fromSec * 1000).toISOString();
-  const endTime = new Date(nowMs).toISOString();
-  
-  console.log(`Starting DNS analytics sync: ${startTime} to ${endTime}`);
-  
-  try {
-    // Fetch time series data with 15-min buckets
-    const timeSeriesQuery = `
-      query GetDNSTimeSeries($accountTag: string!, $start: Time!, $end: Time!) {
-        viewer {
-          scope: accounts(filter: { accountTag: $accountTag }) {
-            sparkline: gatewayResolverQueriesAdaptiveGroups(
-              filter: { datetime_geq: $start, datetime_lt: $end }
-              limit: 5000
-              orderBy: [datetimeFifteenMinutes_ASC]
-            ) {
-              count
-              dimensions {
-                ts: datetimeFifteenMinutes
-              }
-            }
-          }
-        }
-      }
-    `;
-    
-    const topDomainsQuery = `
-      query GetTopDomainsByTime($accountTag: string!, $start: Time!, $end: Time!, $limit: Int!) {
-        viewer {
-          scope: accounts(filter: { accountTag: $accountTag }) {
-            data: gatewayResolverQueriesAdaptiveGroups(
-              filter: { datetime_geq: $start, datetime_lt: $end }
-              limit: $limit
-              orderBy: [count_DESC]
-            ) {
-              count
-              dimensions {
-                ts: datetimeFifteenMinutes
-                queryName
-              }
-            }
-          }
-        }
-      }
-    `;
-    
-    const topLocationsQuery = `
-      query GetTopLocationsByTime($accountTag: string!, $start: Time!, $end: Time!, $limit: Int!) {
-        viewer {
-          accounts(filter: { accountTag: $accountTag }) {
-            data: gatewayResolverQueriesAdaptiveGroups(
-              filter: { datetime_geq: $start, datetime_lt: $end }
-              limit: $limit
-              orderBy: [count_DESC]
-            ) {
-              count
-              dimensions {
-                ts: datetimeFifteenMinutes
-                locationName: coloName
-              }
-            }
-          }
-        }
-      }
-    `;
-    
-    const decisionsQuery = `
-      query GetDecisionsByTime($accountTag: string!, $start: Time!, $end: Time!) {
-        viewer {
-          scope: accounts(filter: { accountTag: $accountTag }) {
-            data: gatewayResolverQueriesAdaptiveGroups(
-              filter: { datetime_geq: $start, datetime_lt: $end }
-              limit: 100
-              orderBy: [count_DESC]
-            ) {
-              count
-              dimensions {
-                ts: datetimeFifteenMinutes
-                metric: resolverDecision
-              }
-            }
-          }
-        }
-      }
-    `;
-    
-    const variables = {
-      accountTag: ACCOUNT_ID,
-      start: startTime,
-      end: endTime,
-      limit: 100
-    };
-    
-    // Fetch all data types in parallel
-    const [timeSeriesRes, domainsRes, locationsRes, decisionsRes] = await Promise.all([
-      fetch('https://api.cloudflare.com/client/v4/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
-        body: JSON.stringify({ query: timeSeriesQuery, variables })
-      }).then(r => r.json()),
-      fetch('https://api.cloudflare.com/client/v4/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
-        body: JSON.stringify({ query: topDomainsQuery, variables: { ...variables, limit: 100 } })
-      }).then(r => r.json()),
-      fetch('https://api.cloudflare.com/client/v4/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
-        body: JSON.stringify({ query: topLocationsQuery, variables: { ...variables, limit: 100 } })
-      }).then(r => r.json()),
-      fetch('https://api.cloudflare.com/client/v4/graphql', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
-        body: JSON.stringify({ query: decisionsQuery, variables })
-      }).then(r => r.json())
-    ]);
-    
-    // Process and store time series
-    const tsData = timeSeriesRes.data?.viewer?.scope?.[0]?.sparkline || [];
-    const domainsData = domainsRes.data?.viewer?.scope?.[0]?.data || [];
-    const locationsData = locationsRes.data?.viewer?.accounts?.[0]?.data || [];
-    const decisionsData = decisionsRes.data?.viewer?.scope?.[0]?.data || [];
-    
-    db.exec('BEGIN TRANSACTION');
-    try {
-      // Store time series buckets
-      const insertTs = db.prepare('INSERT OR REPLACE INTO dns_timeseries (bucket_ts, count) VALUES (?, ?)');
-      for (const item of tsData) {
-        const ts = new Date(item.dimensions?.ts).getTime();
-        if (!Number.isFinite(ts)) continue;
-        const bucketTs = get15MinBucketTs(ts);
-        insertTs.run(bucketTs, item.count || 0);
-      }
-      
-      // Store top domains by bucket
-      const insertDomain = db.prepare('INSERT OR REPLACE INTO dns_top_domains (bucket_ts, domain, count) VALUES (?, ?, ?)');
-      for (const item of domainsData) {
-        const ts = new Date(item.dimensions?.ts).getTime();
-        if (!Number.isFinite(ts)) continue;
-        const bucketTs = get15MinBucketTs(ts);
-        insertDomain.run(bucketTs, item.dimensions?.queryName || 'N/A', item.count || 0);
-      }
-      
-      // Store top locations by bucket
-      const insertLocation = db.prepare('INSERT OR REPLACE INTO dns_top_locations (bucket_ts, location, count) VALUES (?, ?, ?)');
-      for (const item of locationsData) {
-        const ts = new Date(item.dimensions?.ts).getTime();
-        if (!Number.isFinite(ts)) continue;
-        const bucketTs = get15MinBucketTs(ts);
-        insertLocation.run(bucketTs, item.dimensions?.locationName || 'Unknown', item.count || 0);
-      }
-      
-      // Store resolver decisions by bucket
-      const insertDecision = db.prepare('INSERT OR REPLACE INTO dns_resolver_decisions (bucket_ts, decision, count) VALUES (?, ?, ?)');
-      for (const item of decisionsData) {
-        const ts = new Date(item.dimensions?.ts).getTime();
-        if (!Number.isFinite(ts)) continue;
-        const bucketTs = get15MinBucketTs(ts);
-        const decision = String(item.dimensions?.metric || '');
-        insertDecision.run(bucketTs, decision, item.count || 0);
-      }
-      
-      // Clean old data beyond retention
-      const retentionCutoff = nowSec - DNS_ANALYTICS_RETENTION_DAYS * 24 * 60 * 60;
-      db.prepare('DELETE FROM dns_timeseries WHERE bucket_ts < ?').run(retentionCutoff);
-      db.prepare('DELETE FROM dns_top_domains WHERE bucket_ts < ?').run(retentionCutoff);
-      db.prepare('DELETE FROM dns_top_locations WHERE bucket_ts < ?').run(retentionCutoff);
-      db.prepare('DELETE FROM dns_resolver_decisions WHERE bucket_ts < ?').run(retentionCutoff);
-      
-      // Update sync state
-      const updateSync = db.prepare(`
-        INSERT INTO sync_state (key, last_synced_ts, oldest_synced_ts) 
-        VALUES ('dns_analytics', ?, COALESCE((SELECT oldest_synced_ts FROM sync_state WHERE key='dns_analytics'), ?))
-        ON CONFLICT(key) DO UPDATE SET last_synced_ts = excluded.last_synced_ts
-      `);
-      updateSync.run(nowSec, fromSec);
-      
-      db.exec('COMMIT');
-      
-      const totalCount = db.prepare('SELECT SUM(count) as total FROM dns_timeseries WHERE bucket_ts >= ?').get(retentionCutoff).total || 0;
-      console.log(`DNS analytics sync complete. Buckets: ${tsData.length}, Total queries in DB: ${totalCount}`);
-    } catch (e) {
-      db.exec('ROLLBACK');
-      throw e;
-    }
-  } catch (err) {
-    console.error('DNS analytics sync failed:', err.message);
-  }
-}
-
 // Unified background sync scheduler (15 minutes)
 const SYNC_INTERVAL_MS = 15 * 60 * 1000;
 
@@ -1719,74 +644,6 @@ function getCutoffForRange(range) {
     case '24h':
     default: return nowSec - 24 * 60 * 60;
   }
-}
-
-function buildDNSAnalyticsDataFromCache(range = '24h') {
-  const cutoffSec = getCutoffForRange(range);
-  const hasData = db.prepare('SELECT 1 FROM dns_timeseries WHERE bucket_ts >= ? LIMIT 1').get(cutoffSec);
-  if (!hasData) return null;
-  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get('dns_analytics');
-  const cachedAt = syncState?.last_synced_ts ? new Date(syncState.last_synced_ts * 1000).toISOString() : null;
-  let bucketIntervalSec;
-  switch (range) {
-    case '7d': bucketIntervalSec = 60 * 60; break;
-    case '30d': bucketIntervalSec = 6 * 60 * 60; break;
-    case '24h':
-    default: bucketIntervalSec = 15 * 60; break;
-  }
-  const tsRows = db.prepare(`
-    SELECT 
-      (bucket_ts / ?) * ? as aggregated_bucket,
-      SUM(count) as count
-    FROM dns_timeseries
-    WHERE bucket_ts >= ?
-    GROUP BY aggregated_bucket
-    ORDER BY aggregated_bucket ASC
-  `).all(bucketIntervalSec, bucketIntervalSec, cutoffSec);
-  const timeSeries = tsRows.map(row => ({
-    time: new Date(row.aggregated_bucket * 1000).toISOString(),
-    count: row.count
-  }));
-  const topDomains = db.prepare(`
-    SELECT domain, SUM(count) as total
-    FROM dns_top_domains
-    WHERE bucket_ts >= ?
-    GROUP BY domain
-    ORDER BY total DESC
-    LIMIT 10
-  `).all(cutoffSec).map(r => ({ domain: r.domain, count: r.total }));
-  const topLocations = db.prepare(`
-    SELECT location, SUM(count) as total
-    FROM dns_top_locations
-    WHERE bucket_ts >= ?
-    GROUP BY location
-    ORDER BY total DESC
-    LIMIT 10
-  `).all(cutoffSec).map(r => ({ location: r.location, count: r.total }));
-  const RESOLVER_DECISION_LABELS = {
-    '5': 'Allowed on no policy match',
-    '9': 'Blocked rule',
-    '10': 'Allowed rule',
-  };
-  const resolverDecisions = db.prepare(`
-    SELECT decision, SUM(count) as total
-    FROM dns_resolver_decisions
-    WHERE bucket_ts >= ?
-    GROUP BY decision
-    ORDER BY total DESC
-  `).all(cutoffSec).map(r => ({
-    metric: r.decision,
-    label: RESOLVER_DECISION_LABELS[r.decision] || `Decision ${r.decision}`,
-    count: r.total
-  }));
-  return {
-    timeSeries,
-    totalCount: timeSeries.reduce((sum, item) => sum + (item.count || 0), 0),
-    topDomains,
-    topLocations,
-    resolverDecisions,
-    cachedAt,
-  };
 }
 
 function buildTrafficMapDataFromLogs(range = '24h') {
@@ -1878,165 +735,6 @@ function buildTrafficMapDataFromLogs(range = '24h') {
   };
 }
 
-function readTrafficMapLastRefresh() {
-  const row = db.prepare("SELECT value FROM traffic_map_meta WHERE key = 'last_refresh'").get();
-  if (!row?.value) return null;
-  try {
-    return JSON.parse(row.value);
-  } catch {
-    return null;
-  }
-}
-
-function mergeTrafficMapItems(map, item) {
-  const current = map.get(item.country);
-  if (current) {
-    current.count += item.count || 0;
-  } else {
-    map.set(item.country, { ...item, count: item.count || 0 });
-  }
-}
-
-function mergeTrafficMapRoute(map, route) {
-  if (!route.sourceCountry || !route.destinationCountry) return;
-  const key = `${route.sourceCountry}->${route.destinationCountry}`;
-  const current = map.get(key);
-  if (current) {
-    current.count += route.count || 0;
-  } else {
-    map.set(key, { ...route, count: route.count || 0 });
-  }
-}
-
-function readTrafficMapDailyHistory() {
-  return db.prepare(`
-    SELECT day, total_queries, source_count, destination_count, route_count
-    FROM traffic_map_daily_snapshots
-    WHERE day >= date('now', '-30 days')
-    ORDER BY day ASC
-  `).all().map(row => ({
-    day: row.day,
-    totalQueries: row.total_queries,
-    sourceCount: row.source_count,
-    destinationCount: row.destination_count,
-    routeCount: row.route_count,
-  }));
-}
-
-function buildTrafficMapDataFromAggregateTables() {
-  const sources = db.prepare('SELECT country, lat, lng, count FROM traffic_map_sources ORDER BY count DESC').all();
-  const destinations = db.prepare('SELECT country, lat, lng, count FROM traffic_map_destinations ORDER BY count DESC').all();
-  const routes = db.prepare(`
-    SELECT source_country, destination_country, source_lat, source_lng, destination_lat, destination_lng, count
-    FROM traffic_map_routes
-    ORDER BY count DESC
-  `).all().map(row => ({
-    sourceCountry: row.source_country,
-    sourceLat: row.source_lat,
-    sourceLng: row.source_lng,
-    destinationCountry: row.destination_country,
-    destinationLat: row.destination_lat,
-    destinationLng: row.destination_lng,
-    count: row.count,
-  }));
-  const lastRefresh = readTrafficMapLastRefresh();
-
-  if (sources.length === 0 && destinations.length === 0 && routes.length === 0) return null;
-
-  return {
-    sources,
-    destinations,
-    routes,
-    totalQueries: sources.reduce((sum, source) => sum + (source.count || 0), 0),
-    dailyHistory: readTrafficMapDailyHistory(),
-    lastRefresh,
-    dataRange: lastRefresh?.window ? { oldest: lastRefresh.window.from, latest: lastRefresh.window.to } : null,
-    logsCount: sources.reduce((sum, source) => sum + (source.count || 0), 0),
-    updatedAt: Date.now(),
-  };
-}
-
-function buildTrafficMapDataFromDailySnapshots(range = '7d') {
-  const days = range === '30d' ? 30 : 7;
-  const rows = db.prepare(`
-    SELECT day, payload, updated_at, total_queries
-    FROM traffic_map_daily_snapshots
-    WHERE day >= date('now', ?)
-    ORDER BY day ASC
-  `).all(`-${days - 1} days`);
-
-  if (rows.length === 0) return null;
-
-  const sources = new Map();
-  const destinations = new Map();
-  const routes = new Map();
-  let totalQueries = 0;
-
-  for (const row of rows) {
-    totalQueries += row.total_queries || 0;
-    let payload;
-    try {
-      payload = JSON.parse(row.payload);
-    } catch {
-      continue;
-    }
-    for (const source of payload.sources || []) mergeTrafficMapItems(sources, source);
-    for (const destination of payload.destinations || []) mergeTrafficMapItems(destinations, destination);
-    for (const route of payload.routes || []) {
-      mergeTrafficMapRoute(routes, {
-        sourceCountry: route.sourceCountry ?? route.source_country,
-        sourceLat: route.sourceLat ?? route.source_lat,
-        sourceLng: route.sourceLng ?? route.source_lng,
-        destinationCountry: route.destinationCountry ?? route.destination_country,
-        destinationLat: route.destinationLat ?? route.destination_lat,
-        destinationLng: route.destinationLng ?? route.destination_lng,
-        count: route.count || 0,
-      });
-    }
-  }
-
-  return {
-    sources: [...sources.values()].sort((a, b) => b.count - a.count),
-    destinations: [...destinations.values()].sort((a, b) => b.count - a.count),
-    routes: [...routes.values()].sort((a, b) => b.count - a.count),
-    totalQueries,
-    dailyHistory: readTrafficMapDailyHistory(),
-    lastRefresh: readTrafficMapLastRefresh(),
-    dataRange: {
-      oldest: `${rows[0].day}T00:00:00Z`,
-      latest: `${rows[rows.length - 1].day}T23:59:59Z`,
-    },
-    logsCount: totalQueries,
-    updatedAt: Date.now(),
-  };
-}
-
-async function buildTrafficMapData(range = '24h') {
-  const aggregateData = range === '24h'
-    ? buildTrafficMapDataFromAggregateTables()
-    : buildTrafficMapDataFromDailySnapshots(range);
-  if (aggregateData) return aggregateData;
-  return buildTrafficMapDataFromLogs(range);
-}
-
-async function emitTrafficMapData(socket, range = '24h', source = 'cache') {
-  const data = await buildTrafficMapData(range);
-  const lastRefresh = readTrafficMapLastRefresh();
-  const syncState = db.prepare('SELECT last_synced_ts FROM sync_state WHERE key = ?').get(lastRefresh ? 'traffic_map_graphql' : 'traffic_map');
-  const cachedAt = source === 'live'
-    ? new Date().toISOString()
-    : lastRefresh?.updatedAt || (syncState?.last_synced_ts
-      ? new Date(syncState.last_synced_ts * 1000).toISOString()
-      : null);
-  socket.emit('traffic_map_data', {
-    success: true,
-    ...data,
-    range,
-    source,
-    cachedAt,
-  });
-}
-
 function emitDNSAnalyticsData(socket, range = '24h', source = 'cache') {
   const cached = buildDNSAnalyticsDataFromCache(range);
   if (cached) {
@@ -2099,6 +797,26 @@ io.on('connection', (socket) => {
       await runScript(["download_lists.js"], socket);
       await runScript(["cf_list_create.js"], socket);
       await runScript(["cf_gateway_rule_create.js"], socket);
+      
+      // Auto-defragment after sync (if enabled) to clean up any empty lists
+      if (CZGS_AUTO_DEFRAGMENT) {
+        socket.emit('log', "\n\x1b[36m--- Running Auto-Defragment ---\x1b[0m\n");
+        const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists();
+        
+        if (emptyLists.length > 0) {
+          socket.emit('log', `\x1b[32mFound ${emptyLists.length} empty list(s) to clean up\x1b[0m\n`);
+          await upsertZeroTrustDNSRule(nonEmptyLists, "CZGS Filter Lists");
+          if (BLOCK_BASED_ON_SNI) {
+            await upsertZeroTrustSNIRule(nonEmptyLists, "CZGS Filter Lists - SNI Based Filtering");
+          }
+          await deleteZeroTrustListsOneByOne(emptyLists);
+          socket.emit('log', `\x1b[32mAuto-defragment complete: deleted ${emptyLists.length} empty lists\x1b[0m\n`);
+        } else {
+          socket.emit('log', "\x1b[32mNo empty lists found - defragment skipped\x1b[0m\n");
+        }
+      } else {
+        socket.emit('log', "\n\x1b[33mAuto-defragment disabled (set CZGS_AUTO_DEFRAGMENT=1 to enable)\x1b[0m\n");
+      }
     } catch (err) {
       socket.emit("log", `\x1b[31mError during update: ${err.message}\x1b[0m\n`);
     } finally {
@@ -2133,11 +851,52 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Defragment Lists API
+  socket.on('run_defragment', async () => {
+    try {
+      socket.emit('log', "\x1b[36m--- Starting Defragment ---\x1b[0m\n");
+      socket.emit('log', "\x1b[36mDefragmenting lists...\x1b[0m\n");
+      
+      const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists();
+      
+      socket.emit('log', `\x1b[32mDefragmented ${stats.chunks} lists → ${stats.assignedLists} lists\x1b[0m\n`);
+      socket.emit('log', `\x1b[32mMoved ${stats.entriesToMove} entries across ${stats.patches} patches\x1b[0m\n`);
+
+      if (emptyLists.length > 0) {
+        socket.emit('log', "\x1b[36mUpdating rules to exclude empty lists...\x1b[0m\n");
+        await upsertZeroTrustDNSRule(nonEmptyLists, "CZGS Filter Lists");
+        socket.emit('log', `\x1b[32mUpdated DNS rule using ${stats.nonEmptyLists} non-empty lists\x1b[0m\n`);
+
+        if (BLOCK_BASED_ON_SNI) {
+          await upsertZeroTrustSNIRule(nonEmptyLists, "CZGS Filter Lists - SNI Based Filtering");
+          socket.emit('log', "\x1b[32mUpdated SNI rule\x1b[0m\n");
+        }
+
+        socket.emit('log', `\x1b[36mDeleting ${emptyLists.length} empty list(s)...\x1b[0m\n`);
+        await deleteZeroTrustListsOneByOne(emptyLists);
+        socket.emit('log', `\x1b[32mDeleted ${emptyLists.length} empty lists\x1b[0m\n`);
+      } else {
+        socket.emit('log', "\x1b[33mNo empty lists to clean up.\x1b[0m\n");
+      }
+
+      socket.emit('log', "\x1b[32m=== Defragment complete ===\x1b[0m\n");
+    } catch (err) {
+      socket.emit('log', `\x1b[31mError during defragment: ${err.message}\x1b[0m\n`);
+    } finally {
+      socket.emit("update_complete");
+    }
+  });
+
   // IPv4 Gateway Location Management API
   socket.on('get_gateway_location_ipv4', async () => {
+    const locationId = await getGatewayLocationId(socket);
+    if (!locationId) {
+      socket.emit('gateway_location_ipv4_error', { error: 'CLOUDFLARE_GATEWAY_LOCATION_ID not configured' });
+      return;
+    }
     try {
-      socket.emit('log', `\x1b[36mLoading Cloudflare Gateway location ${GATEWAY_LOCATION_ID}...\x1b[0m\n`);
-      const response = await requestGateway(`/locations/${GATEWAY_LOCATION_ID}`, { method: "GET" });
+      socket.emit('log', `\x1b[36mLoading Cloudflare Gateway location ${locationId}...\x1b[0m\n`);
+      const response = await requestGateway(`/locations/${locationId}`, { method: "GET" });
       if (response?.success === false) throw new Error(JSON.stringify(response.errors));
 
       const location = response?.result;
@@ -2155,6 +914,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('update_gateway_location_ipv4', async ({ ipv4 }) => {
+    const locationId = await getGatewayLocationId(socket);
+    if (!locationId) {
+      socket.emit('gateway_location_ipv4_error', { error: 'CLOUDFLARE_GATEWAY_LOCATION_ID not configured' });
+      return;
+    }
     const cleanIpv4 = String(ipv4 || "").trim();
     try {
       if (isIP(cleanIpv4) !== 4) {
@@ -2163,7 +927,7 @@ io.on('connection', (socket) => {
 
       const newNetwork = `${cleanIpv4}/32`;
       socket.emit('log', `\x1b[36mFetching current Cloudflare Gateway location before update...\x1b[0m\n`);
-      const currentResponse = await requestGateway(`/locations/${GATEWAY_LOCATION_ID}`, { method: "GET" });
+      const currentResponse = await requestGateway(`/locations/${locationId}`, { method: "GET" });
       if (currentResponse?.success === false) throw new Error(JSON.stringify(currentResponse.errors));
 
       const currentLocation = currentResponse?.result;
@@ -2174,7 +938,7 @@ io.on('connection', (socket) => {
       socket.emit('log', `Requested protected source IPv4 network: ${newNetwork}\n`);
 
       const updatePayload = buildGatewayLocationUpdatePayload(currentLocation, newNetwork);
-      const updateResponse = await requestGateway(`/locations/${GATEWAY_LOCATION_ID}`, {
+      const updateResponse = await requestGateway(`/locations/${locationId}`, {
         method: "PUT",
         body: JSON.stringify(updatePayload),
       });
@@ -2262,17 +1026,12 @@ io.on('connection', (socket) => {
       if (finalDomains.length === 0) return;
 
       socket.emit('log', `\x1b[34mProcessing ${action} for ${finalDomains.length} domain(s)...\x1b[0m\n`);
-      const patchData = action === 'add' 
+      const patchData = action === 'add'
         ? { append: finalDomains.map(d => ({ value: d })) }
         : { remove: finalDomains };
 
-      const patchResult = await requestGateway(`/lists/${listId}`, {
-        method: "PATCH",
-        body: JSON.stringify(patchData),
-      });
+      await patchExistingListChunked(listId, patchData, 'Custom Allowlist');
 
-      if (patchResult?.success === false) throw new Error(JSON.stringify(patchResult.errors));
-      
       const allowRuleAction = await upsertAllowRule(listId);
       socket.emit('log', `\x1b[32mSuccessfully updated allowlist and rule (${allowRuleAction}).\x1b[0m\n`);
     } catch (e) {
@@ -2320,17 +1079,12 @@ io.on('connection', (socket) => {
       if (finalDomains.length === 0) return;
 
       socket.emit('log', `\x1b[34mProcessing ${action} for ${finalDomains.length} domain(s)...\x1b[0m\n`);
-      const patchData = action === 'add' 
+      const patchData = action === 'add'
         ? { append: finalDomains.map(d => ({ value: d })) }
         : { remove: finalDomains };
 
-      const patchResult = await requestGateway(`/lists/${listId}`, {
-        method: "PATCH",
-        body: JSON.stringify(patchData),
-      });
+      await patchExistingListChunked(listId, patchData, 'Custom Denylist');
 
-      if (patchResult?.success === false) throw new Error(JSON.stringify(patchResult.errors));
-      
       const denyRuleAction = await upsertDenyRule(listId);
       socket.emit('log', `\x1b[32mSuccessfully updated denylist and rule (${denyRuleAction}).\x1b[0m\n`);
     } catch (e) {
@@ -2592,9 +1346,7 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3333;
 const HOST = process.env.HOST || (existsSync("/.dockerenv") ? "0.0.0.0" : "127.0.0.1");
 
-if (!DASHBOARD_PASSWORD && !DASHBOARD_AUTH_DISABLED) {
-  console.warn("Dashboard remote access is blocked until DASHBOARD_PASSWORD is set.");
-}
+logDashboardSecurityWarning();
 
 // Boot logs - DB status and persistence info
 function logDatabaseStatus() {

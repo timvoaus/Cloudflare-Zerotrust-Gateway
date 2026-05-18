@@ -23,8 +23,14 @@ const downloadLists = async (filename, urls) => {
     await unlink(filePath);
   }
 
+  console.log(`CZGS_PROGRESS|phase=download|current=0|total=${urls.length}|message=Starting download of ${filename}...`);
+
   try {
-    await downloadFiles(filePath, urls);
+    await downloadFiles(filePath, urls, (completed, total) => {
+      console.log(`CZGS_PROGRESS|phase=download|current=${completed}|total=${total}|message=Downloaded ${completed}/${total} files for ${filename}`);
+    });
+
+    console.log(`CZGS_PROGRESS|phase=download|current=${urls.length}|total=${urls.length}|message=Download complete for ${filename}`);
 
     console.log(
       `Done. The ${filename} file contains merged data from the following list(s):`

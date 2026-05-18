@@ -13,6 +13,17 @@ This project builds on the backend foundation provided by [`mrrfv/cloudflare-gat
 - Backend foundation inspired by and adapted from [`mrrfv/cloudflare-gateway-pihole-scripts`](https://github.com/mrrfv/cloudflare-gateway-pihole-scripts).
 - This project was heavily developed using AI-assisted workflows and vibe coding techniques to accelerate prototyping, feature development, refactoring, and documentation.
 
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, data flow diagrams, module structure |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Complete environment variable reference |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Development roadmap and technical notes |
+
+**Quick Start:** See [Requirements](#requirements) and [Quick Start With Docker](#quick-start-with-docker) below to get running in minutes.
+
 ## Web Interface
 
 ### DNS Analytics
@@ -53,6 +64,8 @@ Dashboard interface for managing custom allowlist entries with real-time termina
 - Blocklist and allowlist URL management
 - Custom allowlist management with an allow rule
 - Traffic-map history using Cloudflare analytics and local SQLite snapshots
+- **List defragmentation** to clean up empty lists and optimize DNS rule size
+- **DNS endpoints management** with auto-detection of Gateway Location ID
 - Docker and Docker Compose support
 - Direct CLI scripts for automation and advanced use
 
@@ -104,6 +117,7 @@ DASHBOARD_AUTH_DISABLED=0
 - Cloudflare Account ID
 - Cloudflare API Token with Zero Trust Gateway read/edit permissions
 - Docker, or Node.js 24.x for local development
+- (Optional) Cloudflare Gateway Location ID - auto-detected if not set
 
 ## Quick Start With Docker
 
@@ -112,6 +126,8 @@ Create a `.env` file:
 ```ini
 CLOUDFLARE_API_TOKEN=your_token_here
 CLOUDFLARE_ACCOUNT_ID=your_account_id_here
+# Optional: auto-detected from your account if not set
+# CLOUDFLARE_GATEWAY_LOCATION_ID=your_location_id_here
 DASHBOARD_USERNAME=admin
 DASHBOARD_PASSWORD=choose_a_strong_password
 TRAFFIC_MAP_HOURS=24
@@ -153,6 +169,35 @@ docker compose up -d --build
 ```
 
 The included `docker-compose.yml` builds locally from this repository.
+
+## Health Endpoint
+
+The dashboard exposes a health check endpoint at `GET /api/health` for Docker and monitoring systems:
+
+```json
+{
+  "ok": true,
+  "cloudflareConfigured": true,
+  "databaseWritable": true,
+  "uptime": 3600,
+  "version": "1.0.0"
+}
+```
+
+**Fields:**
+- `ok`: Always `true` if the service is responding
+- `cloudflareConfigured`: `true` if `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set
+- `databaseWritable`: `true` if the SQLite database is accessible
+- `uptime`: Seconds since the server started
+- `version`: Application version from `package.json`
+
+**No sensitive data is exposed.** The endpoint is accessible without authentication for Docker health checks and monitoring systems.
+
+**Docker HEALTHCHECK:** The included `Dockerfile` checks this endpoint every 30 seconds. You can also query it manually:
+
+```bash
+curl http://localhost:3333/api/health
+```
 
 ## Local Node.js Setup
 
@@ -198,8 +243,12 @@ Before starting the dashboard, ensure you have configured your Cloudflare creden
     - Create/update the Gateway DNS firewall rule.
 4.  **Custom Allowlist**: Use the **Custom Allowlist** tab to manage specific domains that should always be accessible, regardless of what's in the blocklists.
 5.  **Verify Rule Order**: Log in to your [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) and navigate to **Gateway > Firewall Policies > DNS**. Ensure that the `Gateway Custom Allow Rule` is positioned **ABOVE** the `CZGS Filter Lists` rule. Rules are evaluated from top to bottom.
+6.  **Defragment Lists** (optional but recommended): After many updates, empty lists may accumulate. Click **Defragment** to clean them up and optimize your DNS rule expression. This is automatic if you enable `CZGS_AUTO_DEFRAGMENT=1` (use with caution on large lists to avoid API limits).
 
-Full Reset deletes only generated CZGS block resources: lists named `CZGS List...` and rules named `CZGS Filter Lists...`. It preserves the custom allowlist and custom allow rule.
+**Full Reset and Recovery:**
+- **Full Reset** deletes only generated CZGS block resources: lists named `CZGS List...` and rules named `CZGS Filter Lists...`. It preserves the custom allowlist and custom allow rule.
+- **After Full Reset**: Click **Quick Update** to automatically recreate all lists. The script detects that no CZGS lists exist on Cloudflare and performs a full sync (creating all lists from scratch) rather than skipping.
+- **Defragment** consolidates entries and removes empty lists without deleting active block resources.
 
 ## CLI Commands
 
@@ -211,11 +260,18 @@ npm run cloudflare-create:list   # Normalize and sync Gateway lists
 npm run cloudflare-create:rule   # Create or update Gateway block rule
 npm run cloudflare-create        # Run list sync and rule upsert
 npm run cloudflare-refresh       # Download, sync lists, and upsert rule
-npm run cloudflare-defragment    # Repack existing CZGS lists
+npm run cloudflare-defragment    # Defragment: clean empty lists & optimize
 npm run dry                      # Cross-platform dry run
 npm run menu                     # Open the interactive terminal menu
 npm run web                      # Start the web dashboard
 ```
+
+**Defragmentation** (`npm run cloudflare-defragment` or the Defragment button):
+- Identifies empty CZGS lists (no items after domain changes)
+- Rewrites DNS rule to only reference non-empty lists
+- Deletes empty lists safely (no longer referenced)
+- Consolidates domains by age (older domains in earlier lists)
+- Reduces DNS rule size to stay within Cloudflare limits
 
 Deletion scripts are guarded. To intentionally delete CZGS lists or rules, set:
 
@@ -241,11 +297,20 @@ Dry run mode processes the downloaded list files but does not create or update C
 
 ## Environment Variables
 
+For the complete configuration reference, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 | Variable | Required | Description |
 | --- | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | Yes | Cloudflare API token. Prefer this over a global API key. |
 | `CLOUDFLARE_ACCOUNT_ID` | Yes | Cloudflare account ID. |
+| `CLOUDFLARE_GATEWAY_LOCATION_ID` | No | Gateway Location ID for DNS endpoints. Auto-detected from account if not set. |
 | `CLOUDFLARE_LIST_ITEM_LIMIT` | No | Maximum number of blocked domains to process. Default: `300000`. |
+| `GATEWAY_PATCH_CHUNK_SIZE` | No | Maximum items per PATCH request to Cloudflare Gateway lists. Default: `500`. |
+| `CZGS_API_CONCURRENCY` | No | Parallel requests for Cloudflare Gateway read operations. Default: `3`. |
+| `CZGS_DOWNLOAD_CONCURRENCY` | No | Parallel downloads for blocklist/allowlist source URLs. Default: `3`. |
+| `CZGS_SKIP_SYNC_IF_UNCHANGED` | No | Skip Cloudflare sync if lists unchanged **and CZGS lists exist on Cloudflare**. Default: `1` (enabled). Automatically performs full sync if lists were deleted (e.g., after Full Reset). |
+| `CZGS_FORCE_SYNC` | No | Force sync even if unchanged. Default: `0`. Use after manual Cloudflare edits. |
+| `CZGS_AUTO_DEFRAGMENT` | No | Auto-defragment after update. Default: `0`. Enable only for small list counts (< 20) to avoid API limits. |
 | `ALLOWLIST_URLS` | No | Newline-separated list of allowlist source URLs. |
 | `BLOCKLIST_URLS` | No | Newline-separated list of blocklist source URLs. |
 | `BLOCK_PAGE_ENABLED` | No | Set to `1` to enable a Gateway block page. |

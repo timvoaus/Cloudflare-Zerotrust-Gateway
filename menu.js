@@ -20,8 +20,25 @@ import {
   deleteZeroTrustListsOneByOne,
   deleteZeroTrustRule,
   upsertZeroTrustRule,
+  getZeroTrustListItemValues,
+  patchExistingListChunked,
+  defragmentZeroTrustLists,
+  upsertZeroTrustDNSRule,
+  upsertZeroTrustSNIRule,
 } from "./lib/api.js";
 import { requestGateway } from "./lib/helpers.js";
+import {
+  CUSTOM_ALLOWLIST_NAME,
+  CUSTOM_ALLOW_RULE_NAME,
+  GENERATED_RULE_NAME_PREFIX,
+  RULE_ORDER_WARNING,
+  isGeneratedListName,
+  isGeneratedRuleName,
+  isCustomAllowlistName,
+  isCustomAllowRuleName,
+  findCustomAllowlist,
+  upsertAllowRule,
+} from "./lib/server/custom-gateway.js";
 
 // ─── ANSI colours ────────────────────────────────────────────────────────────
 const C = {
@@ -118,7 +135,9 @@ const printMenu = () => {
   console.log(row('2', 'Update List URLs',        'Edit block/allow URLs'));
   console.log(row('3', 'Manage Custom Allowlist', 'Manage CF allow domains'));
   console.log(line);
-  console.log(row('4', 'Full Reset',              'Delete all & start fresh', true));
+  console.log(row('4', 'Defragment Lists',        'Clean empty lists & optimize'));
+  console.log(line);
+  console.log(row('5', 'Full Reset',              'Delete all & start fresh', true));
   console.log(line);
   console.log(`${C.cyan}│${C.reset}  ${C.dim}0   Exit${' '.repeat(W - 10)}${C.reset}${C.cyan}│${C.reset}`);
   console.log(bot);
@@ -306,25 +325,8 @@ async function optionUpdateUrls() {
 // ══════════════════════════════════════════════════════════════════════════════
 // Option 3 — Manage Custom Allowlist
 // ══════════════════════════════════════════════════════════════════════════════
-const CUSTOM_ALLOWLIST_NAME = "Gateway Custom Allowlist";
-const CUSTOM_ALLOW_RULE_NAME = "Gateway Custom Allow Rule";
-const GENERATED_LIST_NAME_PREFIX = "CZGS List";
-const GENERATED_RULE_NAME_PREFIX = "CZGS Filter Lists";
-
-const isGeneratedListName = (name) => name.startsWith(GENERATED_LIST_NAME_PREFIX);
-const isGeneratedRuleName = (name) => name.startsWith(GENERATED_RULE_NAME_PREFIX);
-const isCustomAllowlistName = (name) => name === CUSTOM_ALLOWLIST_NAME || name.endsWith("Custom Allowlist");
-const isCustomAllowRuleName = (name) => name === CUSTOM_ALLOW_RULE_NAME || name.endsWith("Custom Allow Rule");
-const findCustomAllowlist = (lists = []) =>
-  lists.find(({ name }) => name === CUSTOM_ALLOWLIST_NAME)
-  || lists.find(({ name }) => isCustomAllowlistName(name) && !isGeneratedListName(name));
-
 function printRuleOrderWarning() {
-  console.log(`\n${fmt.warn(
-    `IMPORTANT: In Cloudflare Zero Trust → Gateway → Firewall Policies → DNS,\n` +
-    `  move "${CUSTOM_ALLOW_RULE_NAME}" ABOVE "${GENERATED_RULE_NAME_PREFIX}".\n` +
-    `  Rules are evaluated top-to-bottom; allow must come first.`
-  )}`);
+  console.log(`\n${fmt.warn(RULE_ORDER_WARNING)}`);
 }
 
 async function optionManageAllowlist() {
@@ -362,7 +364,9 @@ async function optionManageAllowlist() {
     console.log(fmt.ok(`Created "${CUSTOM_ALLOWLIST_NAME}" (ID: ${customList.id})`));
   }
 
-  await upsertAllowRule(customList.id);
+  console.log(`\n${fmt.step(`Upserting allow rule "${CUSTOM_ALLOW_RULE_NAME}"…`)}`);
+  const allowRuleAction = await upsertAllowRule(customList.id);
+  console.log(fmt.ok(`${allowRuleAction === 'created' ? 'Created' : 'Updated'} allow rule.`));
   printRuleOrderWarning();
 
   // 2. Sub-menu: Add / Remove
@@ -399,43 +403,7 @@ const DOMAIN_RE = /^([a-z0-9-]+\.)+[a-z]{2,}$/;
 
 // ── Fetch items currently in the custom list ──────────────────────────────────
 async function fetchCustomListItems(listId) {
-  const { result } = await requestGateway(`/lists/${listId}/items?per_page=1000`, {
-    method: "GET",
-  });
-  return (result ?? []).map((item) => item.value);
-}
-
-// ── Upsert the allow rule after any list change ───────────────────────────────
-async function upsertAllowRule(listId) {
-  console.log(`\n${fmt.step(`Upserting allow rule "${CUSTOM_ALLOW_RULE_NAME}"…`)}`);
-  const allowExpression = `any(dns.domains[*] in $${listId})`;
-
-  const { result: existingRules } = await getZeroTrustRules();
-  const existingAllowRule = existingRules?.find(({ name }) => name === CUSTOM_ALLOW_RULE_NAME)
-    || existingRules?.find(({ name }) => isCustomAllowRuleName(name) && !isGeneratedRuleName(name));
-
-  const rulePayload = {
-    name: CUSTOM_ALLOW_RULE_NAME,
-    description: `Custom allow list managed by the dashboard. Must be ordered above ${GENERATED_RULE_NAME_PREFIX}.`,
-    enabled: true,
-    action: "allow",
-    filters: ["dns"],
-    traffic: allowExpression,
-  };
-
-  if (existingAllowRule) {
-    await requestGateway(`/rules/${existingAllowRule.id}`, {
-      method: "PUT",
-      body: JSON.stringify(rulePayload),
-    });
-    console.log(fmt.ok("Updated existing allow rule."));
-  } else {
-    await requestGateway("/rules", {
-      method: "POST",
-      body: JSON.stringify(rulePayload),
-    });
-    console.log(fmt.ok("Created allow rule."));
-  }
+  return getZeroTrustListItemValues(listId);
 }
 
 // ── Add domains ───────────────────────────────────────────────────────────────
@@ -472,18 +440,12 @@ async function allowlistAdd(customList) {
   console.log(`\n${fmt.step(`Adding ${valid.length} domain(s):`)}`);
   valid.forEach((d) => console.log(`   ${C.green}+${C.reset} ${d}`));
 
-  const patchResult = await requestGateway(`/lists/${customList.id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ append: valid.map((d) => ({ value: d })) }),
-  });
-
-  if (patchResult?.success === false) {
-    console.log(fmt.err("Cloudflare returned an error:"), JSON.stringify(patchResult.errors));
-    return;
-  }
+  await patchExistingListChunked(customList.id, { append: valid.map((d) => ({ value: d })) }, CUSTOM_ALLOWLIST_NAME);
 
   console.log(fmt.ok(`${valid.length} domain(s) added successfully.`));
-  await upsertAllowRule(customList.id);
+  console.log(`\n${fmt.step(`Upserting allow rule "${CUSTOM_ALLOW_RULE_NAME}"…`)}`);
+  const addRuleAction = await upsertAllowRule(customList.id);
+  console.log(fmt.ok(`${addRuleAction === 'created' ? 'Created' : 'Updated'} allow rule.`));
 }
 
 // ── Remove domains ────────────────────────────────────────────────────────────
@@ -538,22 +500,58 @@ async function allowlistRemove(customList) {
     return;
   }
 
-  const patchResult = await requestGateway(`/lists/${customList.id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ remove: toRemove }),
-  });
-
-  if (patchResult?.success === false) {
-    console.log(fmt.err("Cloudflare returned an error:"), JSON.stringify(patchResult.errors));
-    return;
-  }
+  await patchExistingListChunked(customList.id, { remove: toRemove }, CUSTOM_ALLOWLIST_NAME);
 
   console.log(fmt.ok(`${toRemove.length} domain(s) removed successfully.`));
-  await upsertAllowRule(customList.id);
+  console.log(`\n${fmt.step(`Upserting allow rule "${CUSTOM_ALLOW_RULE_NAME}"…`)}`);
+  const removeRuleAction = await upsertAllowRule(customList.id);
+  console.log(fmt.ok(`${removeRuleAction === 'created' ? 'Created' : 'Updated'} allow rule.`));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Option 4 — Full Reset
+// Option 4 — Defragment Lists
+// ══════════════════════════════════════════════════════════════════════════════
+async function optionDefragment() {
+  console.log(fmt.title("Defragment Lists"));
+  console.log(fmt.info("This will optimize your CZGS lists by:"));
+  console.log(fmt.info("  • Moving older domains to earlier lists"));
+  console.log(fmt.info("  • Consolidating entries to minimize list count"));
+  console.log(fmt.info("  • Deleting empty lists after updating the rule"));
+  console.log();
+
+  if (!(await askConfirm("Proceed with defragmentation?"))) {
+    console.log(fmt.warn("Aborted."));
+    return;
+  }
+
+  console.log(`\n${fmt.step("Starting defragmentation...")}`);
+  const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists();
+
+  console.log(fmt.info(`Defragmented ${stats.chunks} lists → ${stats.assignedLists} lists`));
+  console.log(fmt.info(`Moved ${stats.entriesToMove} entries across ${stats.patches} patches`));
+
+  if (emptyLists.length > 0) {
+    console.log(`\n${fmt.step("Updating rules to exclude empty lists...")}`);
+    await upsertZeroTrustDNSRule(nonEmptyLists, "CZGS Filter Lists");
+    console.log(fmt.ok(`Updated DNS rule using ${stats.nonEmptyLists} non-empty lists`));
+
+    if (BLOCK_BASED_ON_SNI) {
+      await upsertZeroTrustSNIRule(nonEmptyLists, "CZGS Filter Lists - SNI Based Filtering");
+      console.log(fmt.ok("Updated SNI rule"));
+    }
+
+    console.log(`\n${fmt.step(`Deleting ${emptyLists.length} empty list(s)...`)}`);
+    await deleteZeroTrustListsOneByOne(emptyLists);
+    console.log(fmt.ok(`Deleted ${emptyLists.length} empty lists`));
+  } else {
+    console.log(fmt.info("No empty lists to clean up."));
+  }
+
+  console.log(`\n${fmt.ok("Defragmentation complete!")}`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Option 5 — Full Reset
 // ══════════════════════════════════════════════════════════════════════════════
 async function optionFullReset() {
   console.log(fmt.title("Full Reset"));
@@ -625,7 +623,7 @@ async function main() {
     printBanner();
     printMenu();
 
-    const choice = (await ask(`${C.bold}  Enter choice [0-4]:${C.reset} `)).trim();
+    const choice = (await ask(`${C.bold}  Enter choice [0-5]:${C.reset} `)).trim();
     console.log();
 
     try {
@@ -633,13 +631,14 @@ async function main() {
         case "1": await optionUpdate();          break;
         case "2": await optionUpdateUrls();      break;
         case "3": await optionManageAllowlist(); break;
-        case "4": await optionFullReset();       break;
+        case "4": await optionDefragment();      break;
+        case "5": await optionFullReset();       break;
         case "0":
           console.log(fmt.ok("Goodbye!\n"));
           rl.close();
           process.exit(0);
         default:
-          console.log(fmt.warn("Invalid choice. Please enter 0–4."));
+          console.log(fmt.warn("Invalid choice. Please enter 0–5."));
       }
     } catch (err) {
       console.log(`\n${fmt.err("An error occurred:")}`);

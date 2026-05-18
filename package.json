@@ -1,4 +1,5 @@
 {
+    "version": "1.0.0",
     "scripts": {
         "menu": "node menu.js",
         "start": "npm run download && npm run cloudflare-create",
@@ -15,7 +16,8 @@
         "cloudflare-delete:rule": "node cf_gateway_rule_delete.js",
         "cloudflare-delete:list": "node cf_list_delete.js",
         "cloudflare-defragment": "node cf_defragment.js",
-        "web": "node --use-system-ca server.js"
+        "web": "node --use-system-ca server.js",
+        "test": "node --test tests/**/*.test.js"
     },
     "type": "module",
     "dependencies": {

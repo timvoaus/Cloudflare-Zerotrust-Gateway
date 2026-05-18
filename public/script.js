@@ -131,6 +131,39 @@ document.addEventListener('DOMContentLoaded', () => {
     term.write(data);
   });
 
+  // Script Progress Events
+  const progressContainer = document.getElementById('update-progress');
+  const progressPhase = document.getElementById('progress-phase');
+  const progressFraction = document.getElementById('progress-fraction');
+  const progressBar = document.getElementById('progress-bar');
+
+  function updateProgress(data) {
+    if (!progressContainer || !progressPhase || !progressFraction || !progressBar) return;
+
+    // Show progress container
+    progressContainer.style.display = 'block';
+
+    // Format phase name for display
+    const phaseDisplay = data.phase.charAt(0).toUpperCase() + data.phase.slice(1);
+    progressPhase.textContent = data.message || `${phaseDisplay}...`;
+    progressFraction.textContent = `${data.current}/${data.total}`;
+
+    // Calculate percentage
+    const percent = data.total > 0 ? (data.current / data.total) * 100 : 0;
+    progressBar.style.width = `${Math.min(percent, 100)}%`;
+  }
+
+  function hideProgress() {
+    if (progressContainer) {
+      progressContainer.style.display = 'none';
+    }
+  }
+
+  socket.on('script_progress', (data) => {
+    console.log("Script progress:", data);
+    updateProgress(data);
+  });
+
   document.getElementById('btn-clear-term').addEventListener('click', () => {
     term.clear();
   });
@@ -255,7 +288,23 @@ document.addEventListener('DOMContentLoaded', () => {
   btnRunUpdate.addEventListener('click', () => {
     btnRunUpdate.disabled = true;
     term.writeln('\n\x1b[36m--- Starting Update ---\x1b[0m\n');
+    // Reset and show progress
+    if (progressContainer && progressPhase && progressFraction && progressBar) {
+      progressPhase.textContent = 'Starting...';
+      progressFraction.textContent = '0/0';
+      progressBar.style.width = '0%';
+      progressContainer.style.display = 'block';
+    }
     socket.emit('run_update');
+  });
+
+  const btnDefragment = document.getElementById('btn-defragment');
+  btnDefragment.addEventListener('click', () => {
+    if (confirm('Defragment will optimize your CZGS lists by consolidating entries and deleting empty lists. Continue?')) {
+      btnDefragment.disabled = true;
+      term.writeln('\n\x1b[36m--- Starting Defragment ---\x1b[0m\n');
+      socket.emit('run_defragment');
+    }
   });
 
   const btnFullReset = document.getElementById('btn-full-reset');
@@ -269,8 +318,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('update_complete', () => {
     btnRunUpdate.disabled = false;
+    btnDefragment.disabled = false;
     btnFullReset.disabled = false;
     term.writeln('\n\x1b[32m=== All tasks completed ===\x1b[0m\n');
+    hideProgress();
   });
 
   // --- IPv4 Location Actions ---

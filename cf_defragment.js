@@ -7,12 +7,14 @@ import {
 import { BLOCK_BASED_ON_SNI } from "./lib/constants.js";
 import { notifyWebhook } from "./lib/utils.js";
 
+console.log('CZGS_PROGRESS|phase=defrag|current=0|total=1|message=Starting defragment...');
+
 // Defragment the lists and rewrite the rules
 const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists();
 
-
 // If we don't have any empty lists, there's no change to the rules
 if (emptyLists.length > 0) {
+  console.log('CZGS_PROGRESS|phase=defrag|current=0|total=1|message=Updating rules...');
   console.log('Updating rules...');
   // We have any empty lists, first rewrite the rule(s) using the non-empty lists
   await upsertZeroTrustDNSRule(nonEmptyLists, "CZGS Filter Lists");
@@ -24,9 +26,12 @@ if (emptyLists.length > 0) {
   }
 
   // Now the lists are no longer referenced, we can delete them
+  console.log('CZGS_PROGRESS|phase=defrag|current=0|total=1|message=Deleting empty lists...');
   console.log('Deleting empty lists...');
   await deleteZeroTrustListsOneByOne(emptyLists);
 }
+
+console.log('CZGS_PROGRESS|phase=complete|current=1|total=1|message=Defragment complete');
 
 // Print a summary of what we did
 console.log(`Defragmented ${stats.chunks} lists into ${stats.assignedLists} lists`);
