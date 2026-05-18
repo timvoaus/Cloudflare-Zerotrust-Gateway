@@ -73,6 +73,9 @@ CLOUDFLARE_API_TOKEN=your_token_here
 CLOUDFLARE_ACCOUNT_ID=your_account_id_here
 DASHBOARD_USERNAME=admin
 DASHBOARD_PASSWORD=choose_a_strong_password
+TRAFFIC_MAP_HOURS=24
+TRAFFIC_MAP_ROW_LIMIT=10000
+TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS=300
 ```
 
 Run the published image:
@@ -97,7 +100,7 @@ http://localhost:3333
 
 On a remote server, replace `localhost` with the server address only if access is protected.
 
-Traffic map history is stored in SQLite under `CZGS_DATA_DIR` and should be mounted to persistent storage. Dashboard-edited URL settings are stored at `CZGS_ENV_PATH`, which also points into the same persistent Docker volume in the included Compose file. Normal container restarts, image updates, and VPS reboots keep both the traffic database and saved URL settings. Do not remove the Docker volume unless you intentionally want to reset dashboard history and saved URL edits.
+Traffic map aggregates and daily snapshots are stored in SQLite under `CZGS_DATA_DIR` and should be mounted to persistent storage. The 24-hour map is refreshed from Cloudflare GraphQL analytics aggregates, while 7-day and 30-day map ranges are built from locally saved daily snapshots. Dashboard-edited URL settings are stored at `CZGS_ENV_PATH`, which also points into the same persistent Docker volume in the included Compose file. Normal container restarts, image updates, and VPS reboots keep both the traffic database and saved URL settings. Do not remove the Docker volume unless you intentionally want to reset dashboard history and saved URL edits.
 
 ## Docker Compose
 
@@ -216,12 +219,14 @@ Dry run mode processes the downloaded list files but does not create or update C
 | `DASHBOARD_PASSWORD` | Recommended | Enables authenticated remote dashboard access. |
 | `DASHBOARD_AUTH_DISABLED` | No | Set to `1` only if another trusted layer protects the dashboard. |
 | `DASHBOARD_ALLOWED_ORIGINS` | No | Comma-separated Socket.IO CORS origins for advanced reverse-proxy setups. |
-| `TRAFFIC_MAP_HOURS` | No | How far back a full traffic-map Cloudflare sync looks. Default: `24`. |
+| `TRAFFIC_MAP_HOURS` | No | How far back the traffic-map GraphQL aggregate sync looks. Default: `24`, hard-capped at `24`. |
+| `TRAFFIC_MAP_ROW_LIMIT` | No | Maximum grouped rows requested from Cloudflare GraphQL per traffic-map dimension. Default: `10000`. |
+| `TRAFFIC_MAP_SYNC_COOLDOWN_SECONDS` | No | Minimum age before another traffic-map GraphQL sync is attempted. Default: `300`. |
 | `TRAFFIC_MAP_DISPLAY_HOURS` | No | Hours of saved local SQLite traffic history to plot. Set `0` to plot all saved local history. Default: `0`. |
-| `TRAFFIC_MAP_RETENTION_DAYS` | No | Days of local SQLite traffic logs to keep. Set `0` to keep logs indefinitely. Default: `30`. |
+| `TRAFFIC_MAP_RETENTION_DAYS` | No | Days of fallback local SQLite activity logs to keep. Set `0` to keep logs indefinitely. Default: `30`. |
 | `TRAFFIC_MAP_RETENTION_HOURS` | No | Legacy hourly retention override used only when `TRAFFIC_MAP_RETENTION_DAYS` is unset. |
-| `TRAFFIC_MAP_ACTIVITY_LIMIT` | No | Cloudflare Gateway activity rows requested per page. Default: `5000`. |
-| `TRAFFIC_MAP_MAX_ACTIVITY_PAGES` | No | Maximum Cloudflare Gateway activity pages fetched per sync. Default: `20`. |
+| `TRAFFIC_MAP_ACTIVITY_LIMIT` | No | Fallback Cloudflare Gateway activity rows requested per page if GraphQL sync fails. Default: `5000`. |
+| `TRAFFIC_MAP_MAX_ACTIVITY_PAGES` | No | Fallback maximum Cloudflare Gateway activity pages fetched per sync if GraphQL sync fails. Default: `20`. |
 | `CZGS_DELETION_ENABLED` | No | Must be set before deletion scripts will remove lists/rules. |
 
 ## Generated Files
