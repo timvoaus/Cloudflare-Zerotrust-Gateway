@@ -231,6 +231,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
           if (targetId === 'manage-urls') {
             loadUrls();
+          } else if (targetId === 'update-ipv4-location') {
+            loadIpv4Location();
           } else if (targetId === 'manage-rewrites') {
             loadDnsRewrites();
           } else if (targetId === 'manage-allowlist') {
@@ -269,6 +271,118 @@ document.addEventListener('DOMContentLoaded', () => {
     btnRunUpdate.disabled = false;
     btnFullReset.disabled = false;
     term.writeln('\n\x1b[32m=== All tasks completed ===\x1b[0m\n');
+  });
+
+  // --- IPv4 Location Actions ---
+  const ipv4LocationName = document.getElementById('ipv4-location-name');
+  const ipv4CurrentNetwork = document.getElementById('ipv4-current-network');
+  const ipv4LocationLoader = document.getElementById('ipv4-location-loader');
+  const ipv4LocationInput = document.getElementById('ipv4-location-input');
+  const ipv4LocationStatus = document.getElementById('ipv4-location-status');
+  const btnUpdateIpv4Location = document.getElementById('btn-update-ipv4-location');
+  const endpointIpv4 = document.getElementById('endpoint-ipv4');
+  const endpointIpv6 = document.getElementById('endpoint-ipv6');
+  const endpointDot = document.getElementById('endpoint-dot');
+  const endpointDoh = document.getElementById('endpoint-doh');
+  let loadedIpv4Network = '';
+
+  function isValidIpv4(value) {
+    const parts = String(value || '').trim().split('.');
+    return parts.length === 4 && parts.every(part => {
+      if (!/^\d{1,3}$/.test(part)) return false;
+      if (part.length > 1 && part.startsWith('0')) return false;
+      const numeric = Number(part);
+      return numeric >= 0 && numeric <= 255;
+    });
+  }
+
+  function setIpv4LocationStatus(message, type = '') {
+    ipv4LocationStatus.textContent = message;
+    ipv4LocationStatus.className = type ? `status-msg ${type}` : 'status-msg';
+  }
+
+  function setIpv4LocationLoading(isLoading) {
+    ipv4LocationLoader.style.display = isLoading ? 'block' : 'none';
+    btnUpdateIpv4Location.disabled = isLoading;
+  }
+
+  function endpointValue(endpoint) {
+    if (!endpoint || endpoint.enabled === false || !endpoint.value) return 'Unavailable';
+    return endpoint.value;
+  }
+
+  function renderDnsEndpoints(dnsEndpoints = {}) {
+    endpointIpv4.textContent = endpointValue(dnsEndpoints.ipv4);
+    endpointIpv6.textContent = endpointValue(dnsEndpoints.ipv6);
+    endpointDot.textContent = endpointValue(dnsEndpoints.dot);
+    endpointDoh.textContent = endpointValue(dnsEndpoints.doh);
+  }
+
+  function renderGatewayLocationData({ locationName, protectedNetwork, network, dnsEndpoints, updatedAt }) {
+    const currentNetwork = protectedNetwork || network || '';
+    loadedIpv4Network = currentNetwork;
+    ipv4LocationName.textContent = locationName || 'Cloudflare location';
+    ipv4CurrentNetwork.textContent = currentNetwork || 'No protected source IPv4 configured';
+    ipv4LocationInput.value = currentNetwork ? currentNetwork.replace(/\/32$/, '') : '';
+    renderDnsEndpoints(dnsEndpoints);
+    setIpv4LocationStatus(updatedAt ? `Loaded from Cloudflare. Updated ${new Date(updatedAt).toLocaleString()}.` : 'Loaded from Cloudflare.', 'success');
+  }
+
+  function loadIpv4Location() {
+    setIpv4LocationLoading(true);
+    setIpv4LocationStatus('Loading current Cloudflare location...');
+    ipv4LocationName.textContent = 'Loading...';
+    ipv4CurrentNetwork.textContent = 'Loading...';
+    renderDnsEndpoints({
+      ipv4: { value: 'Loading...', enabled: true },
+      ipv6: { value: 'Loading...', enabled: true },
+      dot: { value: 'Loading...', enabled: true },
+      doh: { value: 'Loading...', enabled: true },
+    });
+    socket.emit('get_gateway_location_ipv4');
+  }
+
+  btnUpdateIpv4Location.addEventListener('click', () => {
+    const ipv4 = ipv4LocationInput.value.trim();
+    if (!isValidIpv4(ipv4)) {
+      setIpv4LocationStatus('Enter a valid IPv4 address.', 'error');
+      return;
+    }
+
+    const newNetwork = `${ipv4}/32`;
+    if (loadedIpv4Network === newNetwork) {
+      setIpv4LocationStatus('This IPv4 is already protected.', 'success');
+      return;
+    }
+
+    btnUpdateIpv4Location.disabled = true;
+    setIpv4LocationStatus('Updating Cloudflare location...');
+    term.writeln('\n\x1b[36m--- Updating Cloudflare IPv4 location ---\x1b[0m\n');
+    socket.emit('update_gateway_location_ipv4', { ipv4 });
+  });
+
+  socket.on('gateway_location_ipv4_data', (data) => {
+    setIpv4LocationLoading(false);
+    renderGatewayLocationData(data);
+  });
+
+  socket.on('gateway_location_ipv4_error', ({ error }) => {
+    setIpv4LocationLoading(false);
+    setIpv4LocationStatus(`Error: ${error}`, 'error');
+    ipv4LocationName.textContent = 'Unable to load';
+    ipv4CurrentNetwork.textContent = 'Unavailable';
+    renderDnsEndpoints();
+  });
+
+  socket.on('gateway_location_ipv4_updated', (data) => {
+    btnUpdateIpv4Location.disabled = false;
+    if (!data.success) {
+      setIpv4LocationStatus(`Error: ${data.error}`, 'error');
+      return;
+    }
+
+    renderGatewayLocationData(data);
+    setIpv4LocationStatus(data.updatedAt ? `Updated successfully. Cloudflare updated ${new Date(data.updatedAt).toLocaleString()}.` : 'Updated successfully.', 'success');
   });
 
   // --- Manage URLs Actions ---

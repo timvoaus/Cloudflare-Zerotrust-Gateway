@@ -8,7 +8,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>Cloudflare Zerotrust Gateway Scripts</title>
-  <link rel="stylesheet" href="style.css?v=16">
+  <link rel="stylesheet" href="style.css?v=18">
   <link rel="stylesheet" href="traffic-map.css?v=16">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -54,6 +54,13 @@
             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.59-9.28"></path>
           </svg>
           <span>Quick Update</span>
+        </button>
+        <button class="nav-btn" data-target="update-ipv4-location" data-label="DNS endpoints">
+          <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 21s7-5.4 7-12a7 7 0 0 0-14 0c0 6.6 7 12 7 12z"></path>
+            <circle cx="12" cy="9" r="2.5"></circle>
+          </svg>
+          <span>DNS endpoints</span>
         </button>
         <button class="nav-btn" data-target="manage-urls" data-label="Manage URLs">
           <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -280,6 +287,72 @@
           </div>
         </section>
 
+        <section id="section-update-ipv4-location" class="section" aria-labelledby="ipv4-location-title">
+          <div class="card ipv4-location-card">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow">Gateway Location</span>
+                <h2 id="ipv4-location-title">DNS endpoints</h2>
+                <p class="section-intro">DNS endpoints serve as the point of resolution for DNS queries.</p>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="ipv4-location-layout">
+                <div class="tool-pane ipv4-current-pane">
+                  <div class="pane-heading">
+                    <h3>Current Cloudflare Location</h3>
+                    <span id="ipv4-location-name">Loading...</span>
+                  </div>
+                  <div class="ipv4-current-network">
+                    <span>Protected source IPv4</span>
+                    <strong id="ipv4-current-network">Loading...</strong>
+                  </div>
+                  <div class="loading-spinner" id="ipv4-location-loader" aria-hidden="true"></div>
+                </div>
+                <div class="tool-pane ipv4-update-pane">
+                  <div class="pane-heading">
+                    <h3>Update protected source IPv4</h3>
+                    <span>Saved as /32</span>
+                  </div>
+                  <label class="field-label" for="ipv4-location-input">New ipv4 address</label>
+                  <div class="ipv4-input-row">
+                    <input id="ipv4-location-input" class="text-input" type="text" inputmode="decimal" autocomplete="off" placeholder="122.105.207.21">
+                    <button id="btn-update-ipv4-location" class="btn-primary">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 6L9 17l-5-5"></path>
+                      </svg>
+                      <span>Update</span>
+                    </button>
+                  </div>
+                  <span id="ipv4-location-status" class="status-msg" aria-live="polite"></span>
+                </div>
+              </div>
+              <div class="endpoint-card-grid" aria-label="DNS endpoints">
+                <div class="endpoint-card">
+                  <span class="endpoint-label">IPv4 DNS endpoint</span>
+                  <strong id="endpoint-ipv4">Loading...</strong>
+                  <small>Shared IPv4 resolver pair</small>
+                </div>
+                <div class="endpoint-card">
+                  <span class="endpoint-label">IPv6 DNS endpoint</span>
+                  <strong id="endpoint-ipv6">Loading...</strong>
+                  <small>Cloudflare IPv6 resolver</small>
+                </div>
+                <div class="endpoint-card">
+                  <span class="endpoint-label">DNS over TLS (DoT)</span>
+                  <strong id="endpoint-dot">Loading...</strong>
+                  <small>Use on port 853</small>
+                </div>
+                <div class="endpoint-card">
+                  <span class="endpoint-label">DNS over HTTPS (DoH)</span>
+                  <strong id="endpoint-doh">Loading...</strong>
+                  <small>HTTPS resolver URL</small>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section id="section-manage-urls" class="section" aria-labelledby="urls-title">
           <div class="card editor-card">
             <div class="card-header">
@@ -466,6 +539,6 @@
   </div>
 
   <script src="traffic-map.js?v=16"></script>
-  <script src="script.js?v=51"></script>
+  <script src="script.js?v=53"></script>
 </body>
 </html>

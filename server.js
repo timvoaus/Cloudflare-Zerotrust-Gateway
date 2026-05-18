@@ -184,6 +184,7 @@ const CUSTOM_DENYLIST_NAME = "Gateway Custom Denylist";
 const CUSTOM_DENY_RULE_NAME = "Gateway Custom Deny Rule";
 const DNS_REWRITE_RULE_PREFIX = "Gateway DNS Rewrite - ";
 const DNS_REWRITE_RULE_DESCRIPTION = "DNS rewrite managed by the dashboard. Avoid editing this rule name.";
+const GATEWAY_LOCATION_ID = process.env.CLOUDFLARE_GATEWAY_LOCATION_ID || "97434c6e90c046e9b6def9da8cb08a40";
 const GENERATED_LIST_NAME_PREFIX = "CZGS List";
 const GENERATED_RULE_NAME_PREFIX = "CZGS Filter Lists";
 const RULE_ORDER_WARNING = `IMPORTANT: In Cloudflare Zero Trust > Gateway > Firewall Policies > DNS, move "${CUSTOM_ALLOW_RULE_NAME}" above "${GENERATED_RULE_NAME_PREFIX}". Rules are evaluated top-to-bottom, so the custom allow rule must be first.`;
@@ -367,9 +368,84 @@ function writeEnvUrls(key, urls) {
 }
 
 // Allowlist Helpers
+const CUSTOM_LIST_DOMAIN_RE = /^([a-z0-9-]+\.)+[a-z]{2,}$/;
+
 async function fetchCustomListItems(listId) {
   const { result } = await requestGateway(`/lists/${listId}/items?per_page=1000`, { method: "GET" });
   return (result ?? []).map((item) => item.value);
+}
+
+async function prepareCustomListDomains({ action, listId, domains, socket }) {
+  const validDomains = [];
+  const invalidDomains = [];
+  const duplicateDomains = [];
+  const seenDomains = new Set();
+
+  for (const value of domains ?? []) {
+    const domain = String(value || "").trim().toLowerCase();
+
+    if (!CUSTOM_LIST_DOMAIN_RE.test(domain)) {
+      invalidDomains.push(value);
+      continue;
+    }
+
+    if (seenDomains.has(domain)) {
+      duplicateDomains.push(domain);
+      continue;
+    }
+
+    seenDomains.add(domain);
+    validDomains.push(domain);
+  }
+
+  if (invalidDomains.length > 0) {
+    socket.emit('log', `\x1b[33mSkipping ${invalidDomains.length} invalid domain(s): ${invalidDomains.join(', ')}\x1b[0m\n`);
+  }
+
+  if (duplicateDomains.length > 0) {
+    socket.emit('log', `\x1b[33mSkipping ${duplicateDomains.length} duplicate input domain(s): ${duplicateDomains.join(', ')}\x1b[0m\n`);
+  }
+
+  if (validDomains.length === 0) {
+    socket.emit('log', `\x1b[31mNo valid domains to process.\x1b[0m\n`);
+    return [];
+  }
+
+  socket.emit('log', `\x1b[34mChecking domains in list...\x1b[0m\n`);
+  const existingItems = await fetchCustomListItems(listId);
+  const existingSet = new Set(existingItems);
+
+  if (action === 'add') {
+    const existingDomains = validDomains.filter(domain => existingSet.has(domain));
+    const domainsToAdd = validDomains.filter(domain => !existingSet.has(domain));
+
+    if (existingDomains.length > 0) {
+      socket.emit('log', `\x1b[33mSkipping ${existingDomains.length} domain(s) already in list: ${existingDomains.join(', ')}\x1b[0m\n`);
+    }
+
+    if (domainsToAdd.length === 0) {
+      socket.emit('log', `\x1b[33mAll valid domains are already in the list. Skipping add.\x1b[0m\n`);
+    }
+
+    return domainsToAdd;
+  }
+
+  if (action === 'remove') {
+    const domainsToRemove = validDomains.filter(domain => existingSet.has(domain));
+    const notFoundDomains = validDomains.filter(domain => !existingSet.has(domain));
+
+    if (notFoundDomains.length > 0) {
+      socket.emit('log', `\x1b[33mSkipping ${notFoundDomains.length} domain(s) not found in list: ${notFoundDomains.join(', ')}\x1b[0m\n`);
+    }
+
+    if (domainsToRemove.length === 0) {
+      socket.emit('log', `\x1b[33mNone of the valid domains were found in the list. Skipping remove.\x1b[0m\n`);
+    }
+
+    return domainsToRemove;
+  }
+
+  throw new Error(`Unsupported list action: ${action}`);
 }
 
 async function upsertAllowRule(listId) {
@@ -467,6 +543,74 @@ function serializeDnsRewriteRule(rule) {
     domain: getRewriteDomainFromRule(rule),
     ips: getRewriteIpsFromRule(rule),
     enabled: rule.enabled !== false,
+  };
+}
+
+function getPrimaryIpv4Network(location) {
+  return Array.isArray(location?.networks) && location.networks.length > 0
+    ? location.networks[0]?.network || ""
+    : "";
+}
+
+function getDnsEndpointValue(enabled, value) {
+  return {
+    enabled: enabled !== false && Boolean(value),
+    value: value || "",
+  };
+}
+
+function pickEndpointFields(endpoint = {}, allowedFields = []) {
+  const picked = {};
+  for (const field of allowedFields) {
+    if (endpoint[field] !== undefined) picked[field] = endpoint[field];
+  }
+  return picked;
+}
+
+function buildGatewayLocationUpdatePayload(location, network) {
+  const endpoints = location.endpoints || {};
+  const payload = {
+    name: location.name,
+    networks: [{ network }],
+  };
+
+  if (location.client_default !== undefined) payload.client_default = location.client_default;
+  if (location.dns_destination_ips_id !== undefined) payload.dns_destination_ips_id = location.dns_destination_ips_id;
+  if (location.ecs_support !== undefined) payload.ecs_support = location.ecs_support;
+  if (location.dns_destination_ipv6_block_id) {
+    payload.dns_destination_ipv6_block_id = location.dns_destination_ipv6_block_id;
+  }
+
+  const sanitizedEndpoints = {};
+  if (endpoints.doh) sanitizedEndpoints.doh = pickEndpointFields(endpoints.doh, ["enabled", "networks", "require_token"]);
+  if (endpoints.dot) sanitizedEndpoints.dot = pickEndpointFields(endpoints.dot, ["enabled", "networks"]);
+  if (endpoints.ipv4) sanitizedEndpoints.ipv4 = pickEndpointFields(endpoints.ipv4, ["enabled"]);
+  if (endpoints.ipv6) sanitizedEndpoints.ipv6 = pickEndpointFields(endpoints.ipv6, ["enabled", "networks"]);
+  if (Object.keys(sanitizedEndpoints).length > 0) payload.endpoints = sanitizedEndpoints;
+
+  return payload;
+}
+
+function serializeGatewayLocationIpv4(location) {
+  const protectedNetwork = getPrimaryIpv4Network(location);
+  const ipv4Pair = [location.ipv4_destination, location.ipv4_destination_backup]
+    .filter(Boolean)
+    .join(" / ");
+  const gatewayHostname = location.doh_subdomain
+    ? `${location.doh_subdomain}.cloudflare-gateway.com`
+    : "";
+
+  return {
+    locationName: location.name || "Cloudflare location",
+    protectedNetwork,
+    network: protectedNetwork,
+    dnsEndpoints: {
+      ipv4: getDnsEndpointValue(location.endpoints?.ipv4?.enabled, ipv4Pair),
+      ipv6: getDnsEndpointValue(location.endpoints?.ipv6?.enabled, location.ip),
+      dot: getDnsEndpointValue(location.endpoints?.dot?.enabled, gatewayHostname),
+      doh: getDnsEndpointValue(location.endpoints?.doh?.enabled, gatewayHostname ? `https://${gatewayHostname}/dns-query` : ""),
+    },
+    updatedAt: location.updated_at || null,
   };
 }
 
@@ -1469,6 +1613,68 @@ io.on('connection', (socket) => {
     }
   });
 
+  // IPv4 Gateway Location Management API
+  socket.on('get_gateway_location_ipv4', async () => {
+    try {
+      socket.emit('log', `\x1b[36mLoading Cloudflare Gateway location ${GATEWAY_LOCATION_ID}...\x1b[0m\n`);
+      const response = await requestGateway(`/locations/${GATEWAY_LOCATION_ID}`, { method: "GET" });
+      if (response?.success === false) throw new Error(JSON.stringify(response.errors));
+
+      const location = response?.result;
+      if (!location?.id) throw new Error("Cloudflare did not return a Gateway location.");
+
+      const data = serializeGatewayLocationIpv4(location);
+      socket.emit('log', `\x1b[32mLoaded location "${data.locationName}". Protected source IPv4 network: ${data.protectedNetwork || "none"}\x1b[0m\n`);
+      socket.emit('log', `DNS endpoints: IPv4 ${data.dnsEndpoints.ipv4.value || "unavailable"}, IPv6 ${data.dnsEndpoints.ipv6.value || "unavailable"}, DoT ${data.dnsEndpoints.dot.value || "unavailable"}, DoH ${data.dnsEndpoints.doh.value || "unavailable"}\n`);
+      socket.emit('log', `Cloudflare response: ${JSON.stringify({ success: response.success, result: { id: location.id, name: location.name, networks: location.networks, ipv4_destination: location.ipv4_destination, ipv4_destination_backup: location.ipv4_destination_backup, ip: location.ip, doh_subdomain: location.doh_subdomain, updated_at: location.updated_at } }, null, 2)}\n`);
+      socket.emit('gateway_location_ipv4_data', data);
+    } catch (e) {
+      socket.emit('log', `\x1b[31mFailed to load Cloudflare Gateway location: ${e.message}\x1b[0m\n`);
+      socket.emit('gateway_location_ipv4_error', { error: e.message });
+    }
+  });
+
+  socket.on('update_gateway_location_ipv4', async ({ ipv4 }) => {
+    const cleanIpv4 = String(ipv4 || "").trim();
+    try {
+      if (isIP(cleanIpv4) !== 4) {
+        throw new Error("Enter a valid IPv4 address.");
+      }
+
+      const newNetwork = `${cleanIpv4}/32`;
+      socket.emit('log', `\x1b[36mFetching current Cloudflare Gateway location before update...\x1b[0m\n`);
+      const currentResponse = await requestGateway(`/locations/${GATEWAY_LOCATION_ID}`, { method: "GET" });
+      if (currentResponse?.success === false) throw new Error(JSON.stringify(currentResponse.errors));
+
+      const currentLocation = currentResponse?.result;
+      if (!currentLocation?.id) throw new Error("Cloudflare did not return a Gateway location.");
+
+      const oldNetwork = getPrimaryIpv4Network(currentLocation) || "none";
+      socket.emit('log', `Current protected source IPv4 network: ${oldNetwork}\n`);
+      socket.emit('log', `Requested protected source IPv4 network: ${newNetwork}\n`);
+
+      const updatePayload = buildGatewayLocationUpdatePayload(currentLocation, newNetwork);
+      const updateResponse = await requestGateway(`/locations/${GATEWAY_LOCATION_ID}`, {
+        method: "PUT",
+        body: JSON.stringify(updatePayload),
+      });
+      if (updateResponse?.success === false) throw new Error(JSON.stringify(updateResponse.errors));
+
+      const updatedLocation = updateResponse?.result;
+      if (!updatedLocation?.id) throw new Error("Cloudflare did not return the updated Gateway location.");
+
+      const data = serializeGatewayLocationIpv4(updatedLocation);
+      socket.emit('log', `\x1b[32mCloudflare Gateway location updated successfully.\x1b[0m\n`);
+      socket.emit('log', `\x1b[32mProtected source IPv4 network is now ${data.protectedNetwork || newNetwork}${data.updatedAt ? ` (updated ${data.updatedAt})` : ""}.\x1b[0m\n`);
+      socket.emit('log', `DNS endpoints: IPv4 ${data.dnsEndpoints.ipv4.value || "unavailable"}, IPv6 ${data.dnsEndpoints.ipv6.value || "unavailable"}, DoT ${data.dnsEndpoints.dot.value || "unavailable"}, DoH ${data.dnsEndpoints.doh.value || "unavailable"}\n`);
+      socket.emit('log', `Cloudflare response: ${JSON.stringify({ success: updateResponse.success, result: { id: updatedLocation.id, name: updatedLocation.name, networks: updatedLocation.networks, ipv4_destination: updatedLocation.ipv4_destination, ipv4_destination_backup: updatedLocation.ipv4_destination_backup, ip: updatedLocation.ip, doh_subdomain: updatedLocation.doh_subdomain, updated_at: updatedLocation.updated_at } }, null, 2)}\n`);
+      socket.emit('gateway_location_ipv4_updated', { success: true, ...data });
+    } catch (e) {
+      socket.emit('log', `\x1b[31mIPv4 location update failed: ${e.message}\x1b[0m\n`);
+      socket.emit('gateway_location_ipv4_updated', { success: false, error: e.message });
+    }
+  });
+
   // URL Management API
   socket.on('get_urls', (type) => { // type: 'blocklist' | 'allowlist'
     const key = type === 'blocklist' ? 'BLOCKLIST_URLS' : 'ALLOWLIST_URLS';
@@ -1532,44 +1738,8 @@ io.on('connection', (socket) => {
 
   socket.on('manage_allowlist', async ({ action, listId, domains }) => {
     try {
-      const DOMAIN_RE = /^([a-z0-9-]+\.)+[a-z]{2,}$/;
-      const validDomains = [];
-      const invalidDomains = [];
-
-      for (const d of domains) {
-        if (DOMAIN_RE.test(d)) {
-          validDomains.push(d);
-        } else {
-          invalidDomains.push(d);
-        }
-      }
-
-      if (invalidDomains.length > 0) {
-        socket.emit('log', `\x1b[33mSkipping ${invalidDomains.length} invalid domain(s): ${invalidDomains.join(', ')}\x1b[0m\n`);
-      }
-
-      if (validDomains.length === 0) {
-        socket.emit('log', `\x1b[31mNo valid domains to process.\x1b[0m\n`);
-        return;
-      }
-
-      let finalDomains = validDomains;
-
-      if (action === 'remove') {
-        socket.emit('log', `\x1b[34mChecking domains in list...\x1b[0m\n`);
-        const existingItems = await fetchCustomListItems(listId);
-        const existingSet = new Set(existingItems);
-        finalDomains = validDomains.filter(d => existingSet.has(d));
-        
-        if (finalDomains.length === 0) {
-          socket.emit('log', `\x1b[33mNone of the valid domains were found in the list. Skipping remove.\x1b[0m\n`);
-          return;
-        }
-
-        if (finalDomains.length < validDomains.length) {
-          socket.emit('log', `\x1b[33mSkipping ${validDomains.length - finalDomains.length} domains not found in list.\x1b[0m\n`);
-        }
-      }
+      const finalDomains = await prepareCustomListDomains({ action, listId, domains, socket });
+      if (finalDomains.length === 0) return;
 
       socket.emit('log', `\x1b[34mProcessing ${action} for ${finalDomains.length} domain(s)...\x1b[0m\n`);
       const patchData = action === 'add' 
@@ -1626,44 +1796,8 @@ io.on('connection', (socket) => {
 
   socket.on('manage_denylist', async ({ action, listId, domains }) => {
     try {
-      const DOMAIN_RE = /^([a-z0-9-]+\.)+[a-z]{2,}$/;
-      const validDomains = [];
-      const invalidDomains = [];
-
-      for (const d of domains) {
-        if (DOMAIN_RE.test(d)) {
-          validDomains.push(d);
-        } else {
-          invalidDomains.push(d);
-        }
-      }
-
-      if (invalidDomains.length > 0) {
-        socket.emit('log', `\x1b[33mSkipping ${invalidDomains.length} invalid domain(s): ${invalidDomains.join(', ')}\x1b[0m\n`);
-      }
-
-      if (validDomains.length === 0) {
-        socket.emit('log', `\x1b[31mNo valid domains to process.\x1b[0m\n`);
-        return;
-      }
-
-      let finalDomains = validDomains;
-
-      if (action === 'remove') {
-        socket.emit('log', `\x1b[34mChecking domains in list...\x1b[0m\n`);
-        const existingItems = await fetchCustomListItems(listId);
-        const existingSet = new Set(existingItems);
-        finalDomains = validDomains.filter(d => existingSet.has(d));
-        
-        if (finalDomains.length === 0) {
-          socket.emit('log', `\x1b[33mNone of the valid domains were found in the list. Skipping remove.\x1b[0m\n`);
-          return;
-        }
-
-        if (finalDomains.length < validDomains.length) {
-          socket.emit('log', `\x1b[33mSkipping ${validDomains.length - finalDomains.length} domains not found in list.\x1b[0m\n`);
-        }
-      }
+      const finalDomains = await prepareCustomListDomains({ action, listId, domains, socket });
+      if (finalDomains.length === 0) return;
 
       socket.emit('log', `\x1b[34mProcessing ${action} for ${finalDomains.length} domain(s)...\x1b[0m\n`);
       const patchData = action === 'add' 
