@@ -111,7 +111,7 @@ Create `.env` first, then build and run from source:
 docker compose up -d --build
 ```
 
-The included `docker-compose.yml` builds locally from this repository. It does not pull a Docker Hub image.
+The included `docker-compose.yml` builds locally from this repository.
 
 ## Local Node.js Setup
 
