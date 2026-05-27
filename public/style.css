@@ -831,9 +831,12 @@ textarea:focus {
 }
 
 .btn-large {
+  flex-shrink: 0;
+  min-width: 178px;
   min-height: 54px;
   padding: 13px 24px;
   font-size: 0.98rem;
+  white-space: nowrap;
 }
 
 .btn-danger {
@@ -871,6 +874,40 @@ textarea:focus {
 .sidebar-footer .btn-danger,
 .sidebar-footer .btn-defragment {
   width: 100%;
+}
+
+.sidebar-footer .footer-action {
+  justify-content: flex-start;
+  min-height: 42px;
+}
+
+.sidebar-footer .footer-action.active {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.sidebar-footer .btn-defragment.active {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.18), transparent 38%),
+    linear-gradient(135deg, #6da3f7, #4a7de4 58%, #3368c7);
+  border-color: rgba(190, 215, 255, 0.36);
+  box-shadow:
+    0 0 0 1px rgba(124, 171, 255, 0.14),
+    0 0 14px rgba(100, 149, 237, 0.24),
+    0 8px 18px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.sidebar-footer .btn-danger.active {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.18), transparent 38%),
+    linear-gradient(135deg, #ff8080, #e34b4f 58%, #bf3439);
+  border-color: rgba(255, 196, 196, 0.34);
+  box-shadow:
+    0 0 0 1px rgba(255, 128, 128, 0.14),
+    0 0 14px rgba(255, 111, 112, 0.24),
+    0 8px 18px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .btn-primary:disabled,

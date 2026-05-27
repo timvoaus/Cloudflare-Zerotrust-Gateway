@@ -103,6 +103,7 @@ const db = new DatabaseSync(join(DATA_DIR, 'traffic_logs.db'));
 
 // Cache for auto-detected Gateway Location ID
 let detectedGatewayLocationId = null;
+let activeCloudflareOperation = null;
 
 /**
  * Get the Gateway Location ID (from env or auto-detect).
@@ -322,6 +323,40 @@ app.use(express.json());
 
 
 // Helper to spawn and stream output
+function emitOperationProgress(socket, operation, phase, current, total, message) {
+  socket.emit("script_progress", {
+    operation,
+    phase,
+    current,
+    total,
+    message,
+    timestamp: Date.now(),
+  });
+}
+
+function beginCloudflareOperation(socket, operation, label) {
+  if (activeCloudflareOperation) {
+    const message = `${activeCloudflareOperation.label} is already running. Wait for it to finish before starting ${label}.`;
+    socket.emit("log", `\x1b[33m${message}\x1b[0m\n`);
+    emitOperationProgress(socket, operation, "blocked", 1, 1, message);
+    socket.emit("update_complete", { operation });
+    return false;
+  }
+
+  activeCloudflareOperation = {
+    operation,
+    label,
+    startedAt: Date.now(),
+  };
+  return true;
+}
+
+function endCloudflareOperation(operation) {
+  if (activeCloudflareOperation?.operation === operation) {
+    activeCloudflareOperation = null;
+  }
+}
+
 function runScript(scriptArgs, socket) {
   return new Promise((resolvePromise, rejectPromise) => {
     socket.emit('log', `\x1b[36m> node ${scriptArgs.join(' ')}\x1b[0m\n`);
@@ -362,6 +397,7 @@ function runScript(scriptArgs, socket) {
             if (phase && !isNaN(current) && !isNaN(total)) {
               // Emit structured progress event to frontend
               socket.emit("script_progress", {
+                operation: "update",
                 phase,
                 current,
                 total,
@@ -826,6 +862,7 @@ io.on('connection', (socket) => {
 
   socket.on('run_update', async () => {
     console.log("run_update event received!");
+    if (!beginCloudflareOperation(socket, "update", "Quick Update")) return;
     const updateStarted = Date.now();
     const phaseMs = { download: 0, process: 0, rule: 0, defrag: 0 };
     try {
@@ -877,70 +914,114 @@ io.on('connection', (socket) => {
     } catch (err) {
       socket.emit("log", `\x1b[31mError during update: ${err.message}\x1b[0m\n`);
     } finally {
-      socket.emit("update_complete");
+      endCloudflareOperation("update");
+      socket.emit("update_complete", { operation: "update" });
     }
   });
 
   socket.on('full_reset', async () => {
+    if (!beginCloudflareOperation(socket, "full-reset", "Full Reset")) return;
     try {
       socket.emit('log', "\x1b[33mStarting full reset...\x1b[0m\n");
+      emitOperationProgress(socket, "full-reset", "rules", 0, 1, "Finding generated CZGS rules...");
       const { result: rules } = await getZeroTrustRules();
       const czgsRules = (rules ?? []).filter(({ name }) => isGeneratedRuleName(name));
-      
-      for (const rule of czgsRules) {
-        socket.emit('log', `Deleting rule: ${rule.name}\n`);
-        await deleteZeroTrustRule(rule.id);
+
+      const ruleTotal = Math.max(czgsRules.length, 1);
+      if (czgsRules.length === 0) {
+        socket.emit('log', "No generated CZGS rules found.\n");
+        emitOperationProgress(socket, "full-reset", "rules", 1, ruleTotal, "No generated CZGS rules found.");
       }
 
+      for (const [index, rule] of czgsRules.entries()) {
+        emitOperationProgress(socket, "full-reset", "rules", index, ruleTotal, `Deleting rule ${index + 1}/${czgsRules.length}: ${rule.name}`);
+        socket.emit('log', `Deleting rule ${index + 1}/${czgsRules.length}: ${rule.name}\n`);
+        await deleteZeroTrustRule(rule.id);
+        emitOperationProgress(socket, "full-reset", "rules", index + 1, ruleTotal, `Deleted rule: ${rule.name}`);
+      }
+
+      emitOperationProgress(socket, "full-reset", "lists", 0, 1, "Finding generated CZGS lists...");
       const { result: lists } = await getZeroTrustLists();
       const czgsLists = (lists ?? []).filter(({ name }) => isGeneratedListName(name));
       if (czgsLists.length > 0) {
         socket.emit('log', `Deleting ${czgsLists.length} lists...\n`);
-        await deleteZeroTrustListsOneByOne(czgsLists);
+        await deleteZeroTrustListsOneByOne(czgsLists, {
+          onProgress: ({ current, total, message }) => {
+            emitOperationProgress(socket, "full-reset", "lists", current, Math.max(total, 1), message);
+            socket.emit('log', `${message}\n`);
+          },
+        });
+      } else {
+        socket.emit('log', "No generated CZGS lists found.\n");
+        emitOperationProgress(socket, "full-reset", "lists", 1, 1, "No generated CZGS lists found.");
       }
       
+      emitOperationProgress(socket, "full-reset", "preserve", 1, 1, "Custom resources preserved.");
       socket.emit('log', "\n\x1b[33mCustom allowlist/denylist, DNS rewrites, and their custom rules were preserved.\x1b[0m\n");
       socket.emit('log', "\x1b[33mPlease click Quick Update to recreate generated block lists and rules.\x1b[0m\n");
+      emitOperationProgress(socket, "full-reset", "complete", 1, 1, "Full reset complete.");
     } catch (err) {
       socket.emit("log", `\x1b[31mError during full reset: ${err.message}\x1b[0m\n`);
+      emitOperationProgress(socket, "full-reset", "error", 1, 1, `Error: ${err.message}`);
     } finally {
-      socket.emit("update_complete");
+      endCloudflareOperation("full-reset");
+      socket.emit("update_complete", { operation: "full-reset" });
     }
   });
 
   // Defragment Lists API
   socket.on('run_defragment', async () => {
+    if (!beginCloudflareOperation(socket, "defragment", "Defragment")) return;
     try {
       socket.emit('log', "\x1b[36m--- Starting Defragment ---\x1b[0m\n");
       socket.emit('log', "\x1b[36mDefragmenting lists...\x1b[0m\n");
+      emitOperationProgress(socket, "defragment", "start", 0, 1, "Starting defragment...");
       
-      const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists();
+      const { emptyLists, nonEmptyLists, stats } = await defragmentZeroTrustLists({
+        onProgress: ({ phase, current, total, message }) => {
+          emitOperationProgress(socket, "defragment", phase, current, Math.max(total, 1), message);
+          socket.emit('log', `${message}\n`);
+        },
+      });
       
       socket.emit('log', `\x1b[32mDefragmented ${stats.chunks} lists → ${stats.assignedLists} lists\x1b[0m\n`);
       socket.emit('log', `\x1b[32mMoved ${stats.entriesToMove} entries across ${stats.patches} patches\x1b[0m\n`);
 
       if (emptyLists.length > 0) {
+        emitOperationProgress(socket, "defragment", "rules", 0, BLOCK_BASED_ON_SNI ? 2 : 1, "Updating DNS rule...");
         socket.emit('log', "\x1b[36mUpdating rules to exclude empty lists...\x1b[0m\n");
         await upsertZeroTrustDNSRule(nonEmptyLists, "CZGS Filter Lists");
+        emitOperationProgress(socket, "defragment", "rules", 1, BLOCK_BASED_ON_SNI ? 2 : 1, `Updated DNS rule using ${stats.nonEmptyLists} non-empty lists`);
         socket.emit('log', `\x1b[32mUpdated DNS rule using ${stats.nonEmptyLists} non-empty lists\x1b[0m\n`);
 
         if (BLOCK_BASED_ON_SNI) {
           await upsertZeroTrustSNIRule(nonEmptyLists, "CZGS Filter Lists - SNI Based Filtering");
+          emitOperationProgress(socket, "defragment", "rules", 2, 2, "Updated SNI rule");
           socket.emit('log', "\x1b[32mUpdated SNI rule\x1b[0m\n");
         }
 
+        emitOperationProgress(socket, "defragment", "delete", 0, emptyLists.length, `Deleting ${emptyLists.length} empty list(s)...`);
         socket.emit('log', `\x1b[36mDeleting ${emptyLists.length} empty list(s)...\x1b[0m\n`);
-        await deleteZeroTrustListsOneByOne(emptyLists);
+        await deleteZeroTrustListsOneByOne(emptyLists, {
+          onProgress: ({ current, total, message }) => {
+            emitOperationProgress(socket, "defragment", "delete", current, Math.max(total, 1), message);
+            socket.emit('log', `${message}\n`);
+          },
+        });
         socket.emit('log', `\x1b[32mDeleted ${emptyLists.length} empty lists\x1b[0m\n`);
       } else {
         socket.emit('log', "\x1b[33mNo empty lists to clean up.\x1b[0m\n");
+        emitOperationProgress(socket, "defragment", "delete", 1, 1, "No empty lists to clean up.");
       }
 
       socket.emit('log', "\x1b[32m=== Defragment complete ===\x1b[0m\n");
+      emitOperationProgress(socket, "defragment", "complete", 1, 1, "Defragment complete.");
     } catch (err) {
       socket.emit('log', `\x1b[31mError during defragment: ${err.message}\x1b[0m\n`);
+      emitOperationProgress(socket, "defragment", "error", 1, 1, `Error: ${err.message}`);
     } finally {
-      socket.emit("update_complete");
+      endCloudflareOperation("defragment");
+      socket.emit("update_complete", { operation: "defragment" });
     }
   });
 

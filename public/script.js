@@ -132,30 +132,56 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Script Progress Events
-  const progressContainer = document.getElementById('update-progress');
-  const progressPhase = document.getElementById('progress-phase');
-  const progressFraction = document.getElementById('progress-fraction');
-  const progressBar = document.getElementById('progress-bar');
+  const progressElements = {
+    update: {
+      container: document.getElementById('update-progress'),
+      phase: document.getElementById('progress-phase'),
+      fraction: document.getElementById('progress-fraction'),
+      bar: document.getElementById('progress-bar'),
+    },
+    defragment: {
+      container: document.getElementById('defragment-progress'),
+      phase: document.getElementById('defragment-progress-phase'),
+      fraction: document.getElementById('defragment-progress-fraction'),
+      bar: document.getElementById('defragment-progress-bar'),
+    },
+    'full-reset': {
+      container: document.getElementById('full-reset-progress'),
+      phase: document.getElementById('full-reset-progress-phase'),
+      fraction: document.getElementById('full-reset-progress-fraction'),
+      bar: document.getElementById('full-reset-progress-bar'),
+    },
+  };
 
   function updateProgress(data) {
-    if (!progressContainer || !progressPhase || !progressFraction || !progressBar) return;
+    const operation = data.operation || 'update';
+    const progress = progressElements[operation] || progressElements.update;
+    if (!progress?.container || !progress.phase || !progress.fraction || !progress.bar) return;
 
-    // Show progress container
-    progressContainer.style.display = 'block';
+    progress.container.style.display = 'block';
 
-    // Format phase name for display
-    const phaseDisplay = data.phase.charAt(0).toUpperCase() + data.phase.slice(1);
-    progressPhase.textContent = data.message || `${phaseDisplay}...`;
-    progressFraction.textContent = `${data.current}/${data.total}`;
+    const phase = data.phase || 'progress';
+    const phaseDisplay = phase.charAt(0).toUpperCase() + phase.slice(1);
+    progress.phase.textContent = data.message || `${phaseDisplay}...`;
+    progress.fraction.textContent = `${data.current}/${data.total}`;
 
-    // Calculate percentage
     const percent = data.total > 0 ? (data.current / data.total) * 100 : 0;
-    progressBar.style.width = `${Math.min(percent, 100)}%`;
+    progress.bar.style.width = `${Math.min(percent, 100)}%`;
   }
 
-  function hideProgress() {
-    if (progressContainer) {
-      progressContainer.style.display = 'none';
+  function resetProgress(operation, message = 'Starting...') {
+    const progress = progressElements[operation];
+    if (!progress?.container || !progress.phase || !progress.fraction || !progress.bar) return;
+    progress.phase.textContent = message;
+    progress.fraction.textContent = '0/0';
+    progress.bar.style.width = '0%';
+    progress.container.style.display = 'block';
+  }
+
+  function hideProgress(operation) {
+    const progress = progressElements[operation];
+    if (progress?.container) {
+      progress.container.style.display = 'none';
     }
   }
 
@@ -288,40 +314,38 @@ document.addEventListener('DOMContentLoaded', () => {
   btnRunUpdate.addEventListener('click', () => {
     btnRunUpdate.disabled = true;
     term.writeln('\n\x1b[36m--- Starting Update ---\x1b[0m\n');
-    // Reset and show progress
-    if (progressContainer && progressPhase && progressFraction && progressBar) {
-      progressPhase.textContent = 'Starting...';
-      progressFraction.textContent = '0/0';
-      progressBar.style.width = '0%';
-      progressContainer.style.display = 'block';
-    }
+    resetProgress('update');
     socket.emit('run_update');
   });
 
-  const btnDefragment = document.getElementById('btn-defragment');
+  const btnDefragment = document.getElementById('btn-run-defragment');
   btnDefragment.addEventListener('click', () => {
     if (confirm('Defragment will optimize your CZGS lists by consolidating entries and deleting empty lists. Continue?')) {
       btnDefragment.disabled = true;
       term.writeln('\n\x1b[36m--- Starting Defragment ---\x1b[0m\n');
+      resetProgress('defragment', 'Starting defragment...');
       socket.emit('run_defragment');
     }
   });
 
-  const btnFullReset = document.getElementById('btn-full-reset');
+  const btnFullReset = document.getElementById('btn-run-full-reset');
   btnFullReset.addEventListener('click', () => {
     if (confirm('Are you SURE you want to do a full reset? This will DELETE generated CZGS block lists and block rules, but will preserve the custom allowlist/denylist and their custom rules.')) {
       btnFullReset.disabled = true;
       term.writeln('\n\x1b[31m--- Starting Full Reset ---\x1b[0m\n');
+      resetProgress('full-reset', 'Starting full reset...');
       socket.emit('full_reset');
     }
   });
 
-  socket.on('update_complete', () => {
+  socket.on('update_complete', ({ operation = 'update' } = {}) => {
     btnRunUpdate.disabled = false;
     btnDefragment.disabled = false;
     btnFullReset.disabled = false;
     term.writeln('\n\x1b[32m=== All tasks completed ===\x1b[0m\n');
-    hideProgress();
+    if (operation === 'update') {
+      hideProgress('update');
+    }
   });
 
   // --- IPv4 Location Actions ---
