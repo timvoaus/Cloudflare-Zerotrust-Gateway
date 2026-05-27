@@ -93,6 +93,8 @@
     let initialized = false;
     let lastData = null;
     let loadingStarted = false;
+    let canvasWidth = 0;
+    let canvasHeight = 0;
 
     function visibleCountryFeatures() {
       if (!worldTopology) return [];
@@ -119,6 +121,8 @@
       const width = Math.max(320, stage.clientWidth || 960);
       const height = Math.max(320, stage.clientHeight || 520);
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      canvasWidth = width;
+      canvasHeight = height;
 
       cometCanvas.width = Math.round(width * dpr);
       cometCanvas.height = Math.round(height * dpr);
@@ -139,6 +143,8 @@
       rootGroup = svg.append('g').attr('class', 'traffic-map-root');
       rootGroup.append('g').attr('class', 'traffic-map-countries');
       rootGroup.append('g').attr('class', 'traffic-map-arcs');
+      rootGroup.append('g').attr('class', 'traffic-map-arc-flows');
+      rootGroup.append('g').attr('class', 'traffic-map-route-hover');
       rootGroup.append('g').attr('class', 'traffic-map-destinations');
       rootGroup.append('g').attr('class', 'traffic-map-origins');
 
@@ -195,14 +201,17 @@
       return `M${sx},${sy}A${dr},${dr} 0 0,1 ${tx},${ty}`;
     }
 
-    function sampleRoutePath(route, routeIndex, originColor, flowSpeed, tailScale, tailGapScale, cometSize) {
+    function sampleRoutePath(route, originColor, flowSpeed, dotSize, sampleConfig) {
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       path.setAttribute('d', curvedArc(
         { lat: route.sourceLat, lng: route.sourceLng },
         { lat: route.destinationLat, lng: route.destinationLng }
       ));
       const length = path.getTotalLength();
-      const sampleCount = Math.max(120, Math.min(420, Math.round(length * 0.9)));
+      const sampleCount = Math.max(
+        sampleConfig.min,
+        Math.min(sampleConfig.max, Math.round(length * sampleConfig.factor))
+      );
       const xs = new Float32Array(sampleCount + 1);
       const ys = new Float32Array(sampleCount + 1);
 
@@ -212,7 +221,7 @@
         ys[i] = pt.y;
       }
 
-      const size = cometSize(route.count);
+      const size = dotSize(route.count);
       const color = originColor(route.sourceCountry);
       const colorRgb = hexToRgb(color);
       const duration = flowSpeed(route.count) * 1000;
@@ -224,7 +233,6 @@
         duration,
         color,
         colorRgb,
-        tailEndOffset: tailScale(route.count) * tailGapScale(route.count),
         size,
       };
     }
@@ -239,49 +247,55 @@
       };
     }
 
-    function startComets(routePaths) {
+    function startTrafficDots(routePaths, isDenseRoutes, isCompactView) {
       if (cometTimer) cometTimer.stop();
-      cometTimer = d3.timer(() => {
-        const now = performance.now(); // always use wall-clock so start offsets stay valid after refresh
-        const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      let lastCometFrame = 0;
+      const frameInterval = isDenseRoutes ? 16 : routePaths.length > 160 ? 33 : routePaths.length > 100 ? 24 : 16;
+      const drawDots = now => {
+        const dpr = Math.min(window.devicePixelRatio || 1, isCompactView ? 1.25 : 1.5);
         cometCtx.setTransform(1, 0, 0, 1, 0, 0);
         cometCtx.clearRect(0, 0, cometCanvas.width, cometCanvas.height);
         cometCtx.setTransform(dpr * currentZoom.k, 0, 0, dpr * currentZoom.k, dpr * currentZoom.x, dpr * currentZoom.y);
-        cometCtx.globalCompositeOperation = 'lighter';
+        cometCtx.globalCompositeOperation = isDenseRoutes ? 'source-over' : 'lighter';
         cometCtx.lineCap = 'round';
 
         for (const rp of routePaths) {
           const headProgress = ((now - rp.start) / rp.duration) % 1;
-          const startProgress = Math.max(0, headProgress - rp.tailEndOffset);
-          const tailStart = sampleAt(rp, startProgress);
           const head = sampleAt(rp, headProgress);
-          const gradient = cometCtx.createLinearGradient(tailStart.x, tailStart.y, head.x, head.y);
-          gradient.addColorStop(0, `rgba(${rp.colorRgb.r}, ${rp.colorRgb.g}, ${rp.colorRgb.b}, 0)`);
-          gradient.addColorStop(0.45, `rgba(${rp.colorRgb.r}, ${rp.colorRgb.g}, ${rp.colorRgb.b}, 0.22)`);
-          gradient.addColorStop(0.82, `rgba(${rp.colorRgb.r}, ${rp.colorRgb.g}, ${rp.colorRgb.b}, 0.7)`);
-          gradient.addColorStop(1, `rgba(${rp.colorRgb.r}, ${rp.colorRgb.g}, ${rp.colorRgb.b}, 1)`);
-          cometCtx.strokeStyle = gradient;
-          cometCtx.lineWidth = Math.max(1.2, rp.size * 0.5);
-          cometCtx.beginPath();
+          const headSize = isDenseRoutes ? rp.size * 0.46 : rp.size * 0.72;
 
-          for (let step = 0; step <= 18; step++) {
-            const progress = startProgress + (headProgress - startProgress) * (step / 18);
-            const p = sampleAt(rp, progress);
-            if (step === 0) cometCtx.moveTo(p.x, p.y);
-            else cometCtx.lineTo(p.x, p.y);
+          cometCtx.shadowColor = rp.color;
+          cometCtx.shadowBlur = 0;
+          cometCtx.globalAlpha = 1;
+          cometCtx.fillStyle = `rgba(${rp.colorRgb.r}, ${rp.colorRgb.g}, ${rp.colorRgb.b}, ${isDenseRoutes ? 0.13 : 0.15})`;
+          cometCtx.beginPath();
+          cometCtx.arc(head.x, head.y, headSize * (isDenseRoutes ? 1.05 : 1.55), 0, Math.PI * 2);
+          cometCtx.fill();
+
+          if (!isDenseRoutes) {
+            cometCtx.fillStyle = `rgba(${rp.colorRgb.r}, ${rp.colorRgb.g}, ${rp.colorRgb.b}, 0.46)`;
+            cometCtx.beginPath();
+            cometCtx.arc(head.x, head.y, headSize * 1.28, 0, Math.PI * 2);
+            cometCtx.fill();
           }
 
-          cometCtx.stroke();
           cometCtx.fillStyle = rp.color;
-          cometCtx.shadowColor = rp.color;
-          cometCtx.shadowBlur = rp.size * 2.2;
           cometCtx.beginPath();
-          cometCtx.arc(head.x, head.y, rp.size, 0, Math.PI * 2);
+          cometCtx.arc(head.x, head.y, Math.max(0.75, headSize * (isDenseRoutes ? 0.62 : 0.68)), 0, Math.PI * 2);
           cometCtx.fill();
-          cometCtx.shadowBlur = 0;
         }
 
+        cometCtx.globalAlpha = 1;
         cometCtx.globalCompositeOperation = 'source-over';
+        cometCtx.shadowBlur = 0;
+      };
+
+      requestAnimationFrame(() => drawDots(performance.now()));
+      cometTimer = d3.timer(() => {
+        const now = performance.now(); // always use wall-clock so start offsets stay valid after refresh
+        if (document.hidden || now - lastCometFrame < frameInterval) return;
+        lastCometFrame = now;
+        drawDots(now);
       });
     }
 
@@ -292,7 +306,11 @@
 
       const sources = (data.sources || []).filter(s => s.lat != null && s.lng != null);
       const destinations = (data.destinations || []).filter(d => d.lat != null && d.lng != null);
-      const routes = (data.routes || []).filter(r => r.sourceLat != null && r.destinationLat != null).slice(0, 200);
+      const routes = (data.routes || []).filter(r => r.sourceLat != null && r.destinationLat != null);
+      const isDenseRoutes = routes.length > 300;
+      const viewMin = Math.max(280, Math.min(canvasWidth || 960, canvasHeight || 520));
+      const isCompactView = viewMin < 520;
+      svgEl.parentElement?.classList.toggle('traffic-map-dense-routes', isDenseRoutes);
       const maxDest = Math.max(1, ...destinations.map(d => d.count));
       const maxSrc = Math.max(1, ...sources.map(s => s.count));
       const maxRoute = Math.max(1, ...routes.map(r => r.count));
@@ -314,31 +332,101 @@
         Math.max(0.8, 1.2 * mapScale),
         Math.max(1.5, 3.0 * mapScale),
       ]);
+      const arcOpacity = d3.scaleSqrt().domain([1, maxRoute]).range([0.55, 0.95]);
       const palette = [...d3.schemeTableau10, ...d3.schemeSet2, ...d3.schemePaired];
       const originColor = d3.scaleOrdinal(palette).domain(sources.map(s => s.country));
+      const routeKey = route => `${route.sourceCountry}->${route.destinationCountry}`;
+      const setRouteHover = route => {
+        const key = route ? routeKey(route) : null;
+        rootGroup.select('.traffic-map-arc-flows')
+          .selectAll('path')
+          .classed('is-hovered', d => !!key && routeKey(d) === key);
+
+        const hoverLayer = rootGroup.select('.traffic-map-route-hover');
+        const points = route ? [
+          {
+            role: 'origin',
+            color: originColor(route.sourceCountry),
+            point: projection([route.sourceLng, route.sourceLat]),
+          },
+          {
+            role: 'destination',
+            color: originColor(route.sourceCountry),
+            point: projection([route.destinationLng, route.destinationLat]),
+          },
+        ] : [];
+        hoverLayer.selectAll('circle')
+          .data(points, d => d.role)
+          .join(
+            enter => enter.append('circle')
+              .attr('class', d => `traffic-map-route-endpoint traffic-map-route-endpoint-${d.role}`)
+              .attr('pointer-events', 'none'),
+            update => update,
+            exit => exit.remove()
+          )
+          .attr('cx', d => d.point[0])
+          .attr('cy', d => d.point[1])
+          .attr('r', d => d.role === 'origin' ? 3.8 : 4.8)
+          .attr('stroke', d => d.color);
+      };
 
       const arcSel = rootGroup.select('.traffic-map-arcs').selectAll('path').data(routes, r => `${r.sourceCountry}->${r.destinationCountry}`);
       arcSel.exit().remove();
       arcSel.enter().append('path')
         .attr('class', 'traffic-map-arc-path')
         .attr('fill', 'none')
-        .on('mousemove', (e, d) => showTooltip(`<strong>${escapeHtml(countryLabel(d.sourceCountry))} → ${escapeHtml(countryLabel(d.destinationCountry))}</strong><br>${formatNumber(d.count)} queries`, e))
-        .on('mouseleave', hideTooltip)
+        .on('mousemove', (e, d) => {
+          setRouteHover(d);
+          showTooltip(`<strong>${escapeHtml(countryLabel(d.sourceCountry))} → ${escapeHtml(countryLabel(d.destinationCountry))}</strong><br>${formatNumber(d.count)} queries`, e);
+        })
+        .on('mouseleave', () => {
+          setRouteHover(null);
+          hideTooltip();
+        })
         .merge(arcSel)
         .attr('d', d => curvedArc({ lat: d.sourceLat, lng: d.sourceLng }, { lat: d.destinationLat, lng: d.destinationLng }))
         .attr('stroke', 'transparent')
         .attr('stroke-width', d => Math.max(12, arcW(d.count) * 4))
         .attr('opacity', 0);
 
-      // Comet sizes are also proportional to map size
-      const flowSpeed = d3.scalePow().exponent(0.35).domain([1, maxRoute]).range([3.4, 8.8]);
-      const tailScale = d3.scalePow().exponent(0.35).domain([1, maxRoute]).range([16, 28]);
-      const tailGapScale = d3.scalePow().exponent(0.35).domain([1, maxRoute]).range([0.018, 0.03]);
-      const cometSize = d3.scalePow().exponent(0.35).domain([1, maxRoute]).range([
-        Math.max(1.5, 2.2 * mapScale),
-        Math.max(3.0, 5.5 * mapScale),
+      const staticArcSel = rootGroup.select('.traffic-map-arc-flows').selectAll('path').data(routes, routeKey);
+      staticArcSel.exit().remove();
+      staticArcSel.enter().append('path')
+        .attr('class', 'traffic-map-route-static-arc')
+        .attr('fill', 'none')
+        .attr('pointer-events', 'none')
+        .merge(staticArcSel)
+        .attr('d', d => curvedArc({ lat: d.sourceLat, lng: d.sourceLng }, { lat: d.destinationLat, lng: d.destinationLng }))
+        .attr('stroke', d => originColor(d.sourceCountry))
+        .attr('stroke-width', d => Math.max(0.55, arcW(d.count) * 0.42))
+        .attr('stroke-opacity', d => Math.min(isDenseRoutes ? 0.16 : 0.24, arcOpacity(d.count) * (isDenseRoutes ? 0.18 : 0.26)));
+
+      const mobileFactor = Math.max(0.58, Math.min(1, viewMin / 640));
+      const flowSpeed = d3.scalePow().exponent(0.35).domain([1, maxRoute]).range(
+        isDenseRoutes ? [8.2, 18.2] : [6.6, 15.2]
+      );
+      const dotSize = d3.scalePow().exponent(0.35).domain([1, maxRoute]).range([
+        Math.max(1.7, 2.8 * mobileFactor),
+        Math.min(7.8, Math.max(3.8, viewMin * 0.0115)),
       ]);
-      startComets(routes.map((route, index) => sampleRoutePath(route, index, originColor, flowSpeed, tailScale, tailGapScale, cometSize)));
+      const sampleConfig = {
+        min: isDenseRoutes ? 72 : routes.length > 160 ? 72 : routes.length > 100 ? 84 : isCompactView ? 90 : 110,
+        max: isDenseRoutes
+          ? isCompactView ? 180 : 280
+          : routes.length > 160
+            ? isCompactView ? 150 : 200
+            : routes.length > 100
+              ? isCompactView ? 180 : 240
+              : isCompactView ? 240 : 340,
+        factor: isDenseRoutes
+          ? isCompactView ? 0.5 : 0.68
+          : routes.length > 160
+            ? isCompactView ? 0.42 : 0.5
+            : routes.length > 100
+              ? isCompactView ? 0.5 : 0.6
+              : isCompactView ? 0.6 : 0.75,
+      };
+      startTrafficDots(routes.map(route => sampleRoutePath(route, originColor, flowSpeed, dotSize, sampleConfig)), isDenseRoutes, isCompactView);
 
       const destSel = rootGroup.select('.traffic-map-destinations').selectAll('circle').data(destinations, d => d.country);
       destSel.exit().remove();

@@ -78,6 +78,10 @@
   mix-blend-mode: screen;
 }
 
+.traffic-map-stage.traffic-map-dense-routes #traffic-map-comets {
+  mix-blend-mode: normal;
+}
+
 .traffic-map-country {
   fill: #17213a;
   stroke: #0e1628;
@@ -92,6 +96,28 @@
   fill: none;
   stroke-linecap: round;
   pointer-events: stroke;
+}
+
+.traffic-map-route-static-arc {
+  stroke-linecap: round;
+  transition: stroke-opacity 0.12s ease, stroke-width 0.12s ease;
+}
+
+.traffic-map-route-static-arc.is-hovered {
+  stroke-opacity: 0.58 !important;
+  stroke-width: 1.15px !important;
+  filter: drop-shadow(0 0 1px currentColor);
+}
+
+.traffic-map-route-endpoint {
+  fill: rgba(255, 255, 255, 0.04);
+  stroke-width: 1.25px;
+  filter: drop-shadow(0 0 1px currentColor);
+}
+
+.traffic-map-route-endpoint-destination {
+  fill: rgba(255, 255, 255, 0.08);
+  stroke-width: 1.45px;
 }
 
 .traffic-map-origin-pin {
