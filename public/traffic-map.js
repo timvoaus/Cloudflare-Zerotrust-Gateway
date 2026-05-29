@@ -66,6 +66,7 @@
     const zoomInBtn = document.getElementById('traffic-map-zoom-in');
     const zoomOutBtn = document.getElementById('traffic-map-zoom-out');
     const zoomResetBtn = document.getElementById('traffic-map-zoom-reset');
+    const toggleLockBtn = document.getElementById('traffic-map-toggle-lock');
     const rangePills = document.getElementById('traffic-range-pills');
     const dataStatus = document.getElementById('traffic-data-status');
     let currentRange = '24h';
@@ -96,12 +97,15 @@
     let canvasHeight = 0;
     let baseScale = 1;
     let zoomScale = 1;
+    let dpr = 1;
     const fixedGlobeTilt = -18;
     let globeRotation = [-142, fixedGlobeTilt, 0];
     let isDraggingGlobe = false;
     let pulseRoutes = [];
     const pulsePhaseByRoute = new Map();
     let reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+    let userUnlockedMap = false;
+    let isPinching = false;
 
     function visibleCountryFeatures() {
       if (!worldTopology) return [];
@@ -127,7 +131,7 @@
       const stage = svgEl.parentElement;
       const width = Math.max(320, stage.clientWidth || 960);
       const height = Math.max(320, stage.clientHeight || 520);
-      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      dpr = Math.min(window.devicePixelRatio || 1, width < 520 ? 1.25 : 1.5);
       const compactGlobe = width < 540;
       canvasWidth = width;
       canvasHeight = height;
@@ -195,7 +199,32 @@
       const maxScale = 2.8;
       zoomBehavior = d3.zoom()
         .scaleExtent([0.82, maxScale])
-        .filter(e => e.type === 'wheel' || e.type === 'dblclick')
+        .filter(e => {
+          const isMobileLayout = canvasWidth < 980;
+          const isUnlocked = !isMobileLayout || userUnlockedMap;
+          if (!isUnlocked) return false;
+          
+          if (e.type === 'wheel' || e.type === 'dblclick') return true;
+          
+          if (e.type === 'touchstart') {
+            if (e.touches && e.touches.length >= 2) {
+              isPinching = true;
+              return true;
+            }
+            return false;
+          }
+          if (e.type === 'touchmove') {
+            return isPinching;
+          }
+          if (e.type === 'touchend' || e.type === 'touchcancel') {
+            const wasPinching = isPinching;
+            if (e.touches && e.touches.length < 2) {
+              isPinching = false;
+            }
+            return wasPinching;
+          }
+          return false;
+        })
         .on('zoom', e => {
           zoomScale = e.transform.k;
           projection.scale(baseScale * zoomScale);
@@ -203,7 +232,14 @@
         });
 
       dragBehavior = d3.drag()
-        .filter(e => !(canvasWidth < 540 && e.type === 'touchstart'))
+        .filter(e => {
+          const isMobileLayout = canvasWidth < 980;
+          const isUnlocked = !isMobileLayout || userUnlockedMap;
+          if (!isUnlocked) return false;
+          
+          if (e.touches && e.touches.length > 1) return false;
+          return !e.button;
+        })
         .on('start', () => {
           isDraggingGlobe = true;
           hideTooltip();
@@ -221,6 +257,7 @@
           isDraggingGlobe = false;
         });
       svg.call(zoomBehavior).call(dragBehavior);
+      updateLockStateUI();
       startGlobeRotation();
     }
 
@@ -304,7 +341,7 @@
     function curvedArc(src, dst) {
       const samples = routeSamples(src, dst);
       if (samples.length < 2) return null;
-      return d3.line().curve(d3.curveBasis)(samples);
+      return d3.line()(samples);
     }
 
     function samplePulsePoint(samples, progress) {
@@ -320,7 +357,6 @@
     }
 
     function drawTrafficPulses(now = performance.now()) {
-      const dpr = Math.min(window.devicePixelRatio || 1, canvasWidth < 520 ? 1.25 : 1.5);
       cometCtx.setTransform(1, 0, 0, 1, 0, 0);
       cometCtx.clearRect(0, 0, cometCanvas.width, cometCanvas.height);
       if (reducedMotion || pulseRoutes.length === 0) return;
@@ -669,6 +705,34 @@
       
       render(data);
     });
+
+    function updateLockStateUI() {
+      const isMobileLayout = canvasWidth < 980;
+      const isUnlocked = !isMobileLayout || userUnlockedMap;
+      
+      if (toggleLockBtn) {
+        toggleLockBtn.classList.toggle('unlocked', isUnlocked);
+        toggleLockBtn.classList.toggle('locked', !isUnlocked);
+        toggleLockBtn.setAttribute('aria-label', isUnlocked ? 'Lock map rotation' : 'Unlock map rotation');
+        toggleLockBtn.setAttribute('title', isUnlocked ? 'Lock map rotation' : 'Unlock map rotation');
+      }
+      
+      const stage = svgEl.parentElement;
+      if (stage) {
+        stage.classList.toggle('is-unlocked', isUnlocked);
+      }
+
+      if (svgEl) {
+        svgEl.style.touchAction = isUnlocked ? 'none' : 'pan-y';
+      }
+    }
+
+    if (toggleLockBtn) {
+      toggleLockBtn.addEventListener('click', () => {
+        userUnlockedMap = !userUnlockedMap;
+        updateLockStateUI();
+      });
+    }
 
     if (refreshBtn) refreshBtn.addEventListener('click', () => {
       updateStatusIndicator('loading', null);

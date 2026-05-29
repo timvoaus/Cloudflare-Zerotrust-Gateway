@@ -227,6 +227,16 @@
                 <canvas id="traffic-map-comets" aria-hidden="true"></canvas>
                 <div class="traffic-map-tooltip" id="traffic-map-tooltip"></div>
                 <div class="traffic-map-zoom-btns">
+                  <button class="traffic-map-zoom-btn locked" id="traffic-map-toggle-lock" aria-label="Toggle map interaction" title="Lock/Unlock map rotation">
+                    <svg class="icon-locked" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                      <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                    </svg>
+                    <svg class="icon-unlocked" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                      <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
+                    </svg>
+                  </button>
                   <button class="traffic-map-zoom-btn" id="traffic-map-zoom-in" aria-label="Zoom in">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
                   </button>

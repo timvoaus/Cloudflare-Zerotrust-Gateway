@@ -587,3 +587,47 @@
     box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.18), 0 0 24px rgba(34, 197, 94, 0.34);
   }
 }
+
+/* Lock/Unlock Toggle Button & Unlocked Stage Glow */
+#traffic-map-toggle-lock {
+  display: none; /* Hide on large screens by default */
+}
+
+.traffic-map-zoom-btn.unlocked {
+  color: #fff;
+  background: rgba(249, 115, 22, 0.42) !important;
+  border-color: rgba(249, 115, 22, 0.68) !important;
+  box-shadow: 
+    0 0 10px rgba(249, 115, 22, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+
+.traffic-map-zoom-btn.locked .icon-unlocked {
+  display: none !important;
+}
+
+.traffic-map-zoom-btn.locked .icon-locked {
+  display: block !important;
+}
+
+.traffic-map-zoom-btn.unlocked .icon-locked {
+  display: none !important;
+}
+
+.traffic-map-zoom-btn.unlocked .icon-unlocked {
+  display: block !important;
+}
+
+.traffic-map-stage.is-unlocked {
+  border-color: rgba(249, 115, 22, 0.58) !important;
+  box-shadow: 
+    inset 0 0 0 1px rgba(255, 255, 255, 0.025),
+    0 0 20px rgba(249, 115, 22, 0.22) !important;
+}
+
+@media (max-width: 980px) {
+  #traffic-map-toggle-lock {
+    display: grid; /* Show on tablets/mobile screens to match .traffic-map-zoom-btn */
+  }
+}
+
