@@ -153,13 +153,6 @@
       pathGen = d3.geoPath(projection);
       svg.selectAll('*').remove();
       const defs = svg.append('defs');
-      const glow = defs.append('radialGradient')
-        .attr('id', 'traffic-map-globe-glow')
-        .attr('cx', '36%')
-        .attr('cy', '28%');
-      glow.append('stop').attr('offset', '0%').attr('stop-color', 'rgba(35, 47, 68, 0.34)');
-      glow.append('stop').attr('offset', '62%').attr('stop-color', 'rgba(10, 16, 29, 0.28)');
-      glow.append('stop').attr('offset', '100%').attr('stop-color', 'rgba(2, 6, 14, 0.18)');
       const landDots = defs.append('pattern')
         .attr('id', 'traffic-map-land-dots')
         .attr('width', 5)
