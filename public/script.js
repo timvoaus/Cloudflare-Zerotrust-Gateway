@@ -782,6 +782,116 @@ document.addEventListener('DOMContentLoaded', () => {
     10: '#ec4899',
   };
   const RESOLVER_DECISION_FALLBACK_COLORS = ['#22c55e', '#a855f7', '#14b8a6', '#ef4444', '#eab308', '#6366f1'];
+  const DNS_BUCKET_MS = {
+    '24h': 60 * 60 * 1000,
+    '7d': 24 * 60 * 60 * 1000,
+    '30d': 7 * 24 * 60 * 60 * 1000,
+  };
+
+  function bucketStartMs(date, bucketMs) {
+    const ms = date.getTime();
+    return Math.floor(ms / bucketMs) * bucketMs;
+  }
+
+  function aggregateDNSPoints(timeSeries, range) {
+    if (!Array.isArray(timeSeries)) return { labels: [], data: [] };
+    const bucketMs = DNS_BUCKET_MS[range] || DNS_BUCKET_MS['24h'];
+    const buckets = new Map();
+    timeSeries.forEach(item => {
+      const date = new Date(item.time);
+      if (isNaN(date.getTime())) return;
+      const key = bucketStartMs(date, bucketMs);
+      buckets.set(key, (buckets.get(key) || 0) + (Number(item.count) || 0));
+    });
+
+    const rows = [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([ms, count]) => ({ time: new Date(ms).toISOString(), count }));
+
+    return {
+      labels: rows.map(d => d.time),
+      data: rows.map(d => d.count),
+    };
+  }
+
+  function shouldShowDNSXAxisLabel(index, totalLabels, label, range) {
+    if (totalLabels <= 1) return true;
+    const isMobile = window.innerWidth < 720;
+    const date = new Date(label);
+
+    if (range === '30d') {
+      return true;
+    }
+
+    if (range === '7d') {
+      return true;
+    }
+
+    if (isMobile) {
+      const positions = [
+        0,
+        Math.floor((totalLabels - 1) * 0.25),
+        Math.floor((totalLabels - 1) * 0.5),
+        Math.floor((totalLabels - 1) * 0.75),
+        totalLabels - 1,
+      ];
+      return positions.includes(index);
+    }
+
+    const step = Math.max(1, Math.ceil(totalLabels / 8));
+    return index === 0 || index === totalLabels - 1 || index % step === 0;
+  }
+
+  function formatDNSAxisLabel(label, range) {
+    const date = new Date(label);
+    if (isNaN(date.getTime())) return '';
+
+    if (range === '30d') {
+      const endDate = new Date(date.getTime() + (6 * 24 * 60 * 60 * 1000));
+      const startLabel = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const endLabel = endDate.getMonth() === date.getMonth()
+        ? endDate.toLocaleDateString('en-US', { day: 'numeric' })
+        : endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return `${startLabel}-${endLabel}`;
+    }
+
+    if (range === '7d') {
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
+    if (date.getHours() === 0 && date.getMinutes() === 0) {
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
+    return date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
+
+  function applyDNSChartRangeStyle(range) {
+    if (!dnsChart) return;
+    const [primaryDataset, averageDataset] = dnsChart.data.datasets;
+
+    primaryDataset.type = 'line';
+    primaryDataset.label = {
+      '24h': 'Hourly queries',
+      '7d': 'Daily queries',
+      '30d': 'Weekly queries',
+    }[range] || 'DNS Queries';
+    primaryDataset.borderColor = '#7db6ff';
+    primaryDataset.backgroundColor = 'rgba(125, 182, 255, 0.1)';
+    primaryDataset.borderWidth = 2.2;
+    primaryDataset.borderRadius = 0;
+    primaryDataset.fill = true;
+    primaryDataset.tension = 0.34;
+    primaryDataset.pointRadius = range === '24h' ? 2.4 : 3.6;
+    primaryDataset.pointHoverRadius = 5;
+
+    averageDataset.hidden = true;
+    averageDataset.data = [];
+  }
 
   function renderResolverDecisions(decisions) {
     if (!decisions || decisions.length === 0) {
@@ -855,20 +965,37 @@ document.addEventListener('DOMContentLoaded', () => {
       type: 'line',
       data: {
         labels: [],
-        datasets: [{
-          label: 'DNS Queries',
-          data: [],
-          borderColor: '#7db6ff',
-          backgroundColor: 'rgba(125, 182, 255, 0.1)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.4,
-          pointRadius: 3,
-          pointBackgroundColor: '#7db6ff',
-          pointBorderColor: '#ffffff',
-          pointBorderWidth: 2,
-          spanGaps: true, // Connect points even with gaps
-        }]
+        datasets: [
+          {
+            label: 'DNS Queries',
+            data: [],
+            borderColor: '#7db6ff',
+            backgroundColor: 'rgba(125, 182, 255, 0.1)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.4,
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            pointBackgroundColor: '#7db6ff',
+            pointBorderColor: '#ffffff',
+            pointBorderWidth: 2,
+            spanGaps: true,
+          },
+          {
+            label: '7-day average',
+            data: [],
+            hidden: true,
+            type: 'line',
+            borderColor: '#ff8a1f',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            fill: false,
+            tension: 0.34,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            spanGaps: true,
+          }
+        ]
       },
       options: {
         responsive: true,
@@ -907,7 +1034,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return timeStr;
               },
               label: function(context) {
-                return `Queries: ${context.parsed.y.toLocaleString()}`;
+                return `${context.dataset.label}: ${context.parsed.y.toLocaleString()}`;
               }
             }
           }
@@ -916,28 +1043,22 @@ document.addEventListener('DOMContentLoaded', () => {
           x: {
             type: 'category',
             grid: {
-              color: 'rgba(125, 182, 255, 0.1)',
+              color: function(context) {
+                const index = context.index;
+                const totalLabels = context.scale.ticks.length;
+                const label = context.scale.getLabelForValue(context.tick.value);
+                return shouldShowDNSXAxisLabel(index, totalLabels, label, currentDNSRange)
+                  ? 'rgba(125, 182, 255, 0.1)'
+                  : 'transparent';
+              },
               drawBorder: false,
               drawTicks: true,
               tickLength: 5,
               tickColor: function(context) {
                 const index = context.index;
                 const totalLabels = context.scale.ticks.length;
-                const isMobile = window.innerWidth < 720;
-                let isLabeled;
-                if (isMobile) {
-                  const positions = [
-                    0,
-                    Math.floor((totalLabels - 1) * 0.25),
-                    Math.floor((totalLabels - 1) * 0.5),
-                    Math.floor((totalLabels - 1) * 0.75),
-                    totalLabels - 1,
-                  ];
-                  isLabeled = positions.includes(index);
-                } else {
-                  const step = Math.max(1, Math.ceil(totalLabels / 8));
-                  isLabeled = index === 0 || index === totalLabels - 1 || index % step === 0;
-                }
+                const label = context.scale.getLabelForValue(context.tick.value);
+                const isLabeled = shouldShowDNSXAxisLabel(index, totalLabels, label, currentDNSRange);
                 return isLabeled ? 'rgba(125, 182, 255, 0.1)' : 'transparent';
               }
             },
@@ -951,44 +1072,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const date = new Date(label);
                 if (!isNaN(date.getTime())) {
                   const totalLabels = values.length;
-                  const isMobile = window.innerWidth < 720;
-                  
-                  if (isMobile) {
-                    const positions = [
-                      0,
-                      Math.floor((totalLabels - 1) * 0.25),
-                      Math.floor((totalLabels - 1) * 0.5),
-                      Math.floor((totalLabels - 1) * 0.75),
-                      totalLabels - 1,
-                    ];
-
-                    if (!positions.includes(index)) {
-                      return '';
-                    }
-                  } else {
-                    const step = Math.max(1, Math.ceil(totalLabels / 8));
-
-                    if (index !== 0 && index !== totalLabels - 1 && index % step !== 0) {
-                      return '';
-                    }
+                  if (!shouldShowDNSXAxisLabel(index, totalLabels, label, currentDNSRange)) {
+                    return '';
                   }
-                  
-                  // Desktop: format normally
-                  const hours = date.getHours();
-                  const minutes = date.getMinutes();
-                  
-                  if (hours === 0 && minutes === 0) {
-                    return date.toLocaleDateString('en-US', { 
-                      month: 'short', 
-                      day: 'numeric'
-                    });
-                  }
-                  
-                  return date.toLocaleTimeString('en-US', { 
-                    hour: '2-digit', 
-                    minute: '2-digit',
-                    hour12: false
-                  });
+                  return formatDNSAxisLabel(label, currentDNSRange);
                 }
                 return '';
               }
@@ -1161,20 +1248,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Update chart
     if (dnsChart && timeSeries) {
-      const labels = timeSeries.map(d => d.time);
-      const data = timeSeries.map(d => d.count);
+      const chartRange = range || currentDNSRange;
+      const chartData = aggregateDNSPoints(timeSeries, chartRange);
+      const labels = chartData.labels;
+      const data = chartData.data;
 
-      if (startTime && endTime) {
-        if (!labels.includes(startTime)) {
-          labels.unshift(startTime);
-          data.unshift(null);
-        }
-
-        if (!labels.includes(endTime)) {
-          labels.push(endTime);
-          data.push(null);
-        }
-      }
+      applyDNSChartRangeStyle(chartRange);
 
       // Dynamic Y-axis: bottom fixed at 0, top = ceil(max * 1.1) with 10% headroom
       const numericValues = data.filter(v => v != null && !isNaN(v));
@@ -1189,6 +1268,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       dnsChart.data.labels = labels;
       dnsChart.data.datasets[0].data = data;
+      dnsChart.data.datasets[1].data = [];
       dnsChart.update();
     }
 
