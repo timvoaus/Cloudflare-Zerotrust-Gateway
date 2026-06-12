@@ -128,23 +128,19 @@ jobs:
             log_tail="Refresh log was not created. Check the GitHub Actions run for setup or validation errors."
           fi
 
-          message="$(
-            cat <<EOF
-CZGS Weekly Cloudflare Gateway Refresh
-
-Status: ${status_text}
-Sydney time: ${{ steps.schedule_guard.outputs.sydney_time }}
-Started: ${{ steps.refresh.outputs.started_at || 'not started' }}
-Finished: ${{ steps.refresh.outputs.finished_at || 'not finished' }}
-Repository: ${GITHUB_REPOSITORY}
-Branch: ${GITHUB_REF_NAME}
-Commit: ${GITHUB_SHA}
-Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-Recent log:
-${log_tail}
-EOF
-          )"
+          message="$(printf '%s\n\nStatus: %s\nSydney time: %s\nStarted: %s\nFinished: %s\nRepository: %s\nBranch: %s\nCommit: %s\nRun: %s/%s/actions/runs/%s\n\nRecent log:\n%s' \
+            "CZGS Weekly Cloudflare Gateway Refresh" \
+            "${status_text}" \
+            "${{ steps.schedule_guard.outputs.sydney_time }}" \
+            "${{ steps.refresh.outputs.started_at || 'not started' }}" \
+            "${{ steps.refresh.outputs.finished_at || 'not finished' }}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_REF_NAME}" \
+            "${GITHUB_SHA}" \
+            "${GITHUB_SERVER_URL}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_RUN_ID}" \
+            "${log_tail}")"
 
           curl --fail --show-error --silent \
             --request POST \
