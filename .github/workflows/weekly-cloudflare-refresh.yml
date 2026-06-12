@@ -90,6 +90,22 @@ jobs:
             exit 1
           fi
 
+      - name: Default optional configuration
+        if: steps.schedule_guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "BLOCK_BASED_ON_SNI=${BLOCK_BASED_ON_SNI:-0}"
+            echo "CLOUDFLARE_LIST_ITEM_LIMIT=${CLOUDFLARE_LIST_ITEM_LIMIT:-300000}"
+            echo "CZGS_API_CONCURRENCY=${CZGS_API_CONCURRENCY:-3}"
+            echo "CZGS_DOWNLOAD_CONCURRENCY=${CZGS_DOWNLOAD_CONCURRENCY:-3}"
+            echo "CZGS_FORCE_SYNC=${CZGS_FORCE_SYNC:-0}"
+            echo "CZGS_SKIP_SYNC_IF_UNCHANGED=${CZGS_SKIP_SYNC_IF_UNCHANGED:-1}"
+            echo "GATEWAY_PATCH_CHUNK_SIZE=${GATEWAY_PATCH_CHUNK_SIZE:-500}"
+          } >> "$GITHUB_ENV"
+
       - name: Run Cloudflare refresh
         if: steps.schedule_guard.outputs.should_run == 'true'
         id: refresh
