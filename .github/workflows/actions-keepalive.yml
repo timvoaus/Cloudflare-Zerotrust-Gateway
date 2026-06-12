@@ -1,0 +1,47 @@
+name: Keep Scheduled Workflows Active
+
+on:
+  schedule:
+    # Public repositories can have scheduled workflows disabled after 60 days
+    # without repository activity. This monthly timestamp commit keeps activity
+    # alive without touching app or deployment files.
+    - cron: "17 14 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: actions-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    name: Commit keepalive timestamp
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update keepalive timestamp
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          printf 'Last keepalive: %s\n' "${timestamp}" > .github/actions-keepalive.txt
+
+          if git diff --quiet -- .github/actions-keepalive.txt; then
+            echo "No keepalive update needed."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/actions-keepalive.txt
+          git commit -m "Keep scheduled workflows active"
+          git push
