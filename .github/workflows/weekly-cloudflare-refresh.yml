@@ -26,6 +26,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      HTTPSMS_APPRISE_URL: ${{ secrets.HTTPSMS_APPRISE_URL }}
       ALLOWLIST_URLS: ${{ vars.ALLOWLIST_URLS }}
       BLOCKLIST_URLS: ${{ vars.BLOCKLIST_URLS }}
       BLOCK_BASED_ON_SNI: ${{ vars.BLOCK_BASED_ON_SNI || '0' }}
@@ -151,3 +152,39 @@ jobs:
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${message}"
+
+      - name: Send httpSMS report with Apprise
+        if: steps.schedule_guard.outputs.should_run == 'true' && always()
+        shell: bash
+        run: |
+          set -u
+
+          if [[ -z "${HTTPSMS_APPRISE_URL}" ]]; then
+            echo "HTTPSMS_APPRISE_URL is not set. Skipping SMS notification."
+            exit 0
+          fi
+
+          if [[ "${{ steps.refresh.outcome }}" == "success" ]]; then
+            sms_message="✅ CZGS refresh succeeded"
+          else
+            if [[ -f czgs-refresh.log ]]; then
+              log_tail="$(tail -n 12 czgs-refresh.log | tail -c 1000)"
+            else
+              log_tail="Refresh log was not created. Check the GitHub Actions run for setup or validation errors."
+            fi
+
+            sms_message="$(printf '❌ CZGS refresh failed\n%s' "${log_tail}")"
+          fi
+
+          python3 -m venv "${RUNNER_TEMP}/apprise-venv"
+          # shellcheck source=/dev/null
+          source "${RUNNER_TEMP}/apprise-venv/bin/activate"
+
+          if ! python -m pip install --quiet apprise; then
+            echo "::warning::Could not install Apprise. Skipping SMS notification."
+            exit 0
+          fi
+
+          if ! apprise -t "CZGS refresh" -b "${sms_message}" "${HTTPSMS_APPRISE_URL}"; then
+            echo "::warning::Could not send httpSMS notification with Apprise."
+          fi
