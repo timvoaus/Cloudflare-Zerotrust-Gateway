@@ -116,7 +116,9 @@ jobs:
           started_at="$(TZ=Australia/Sydney date '+%Y-%m-%d %H:%M:%S %Z')"
           echo "started_at=${started_at}" >> "$GITHUB_OUTPUT"
 
-          npm run cloudflare-refresh 2>&1 | tee czgs-refresh.log
+          npm run cloudflare-refresh 2>&1 \
+            | sed -E 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[redacted-id]/g' \
+            | tee czgs-refresh.log
           status=${PIPESTATUS[0]}
 
           finished_at="$(TZ=Australia/Sydney date '+%Y-%m-%d %H:%M:%S %Z')"
@@ -131,18 +133,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
           if [[ "${{ steps.refresh.outcome }}" == "success" ]]; then
+            run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             message="$(printf '✅ CZGS refresh succeeded\n%s' "${run_url}")"
           else
             if [[ -f czgs-refresh.log ]]; then
-              log_tail="$(tail -n 20 czgs-refresh.log | tail -c 2000 | sed -E 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[redacted-id]/g')"
+              log_tail="$(tail -n 20 czgs-refresh.log | tail -c 2000)"
             else
               log_tail="Refresh log was not created. Check the GitHub Actions run for setup or validation errors."
             fi
 
-            message="$(printf '❌ CZGS refresh failed\n%s\n\nRecent log:\n%s' "${run_url}" "${log_tail}")"
+            message="$(printf '❌ CZGS refresh failed\n%s' "${log_tail}")"
           fi
 
           curl --fail --show-error --silent \
